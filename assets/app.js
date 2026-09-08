@@ -337,16 +337,20 @@ function chartTrend(rows) {
   const x = i => months.length === 1 ? M.l + pw / 2 : M.l + (pw * i) / (months.length - 1);
   const y = v => M.t + ph - (v / top) * ph;
 
+  // one decimal precision for the whole axis, taken from the tick step
+  const step = ticks.length > 1 ? ticks[1] - ticks[0] : top;
+  const axisDec = step >= 10 ? 0 : step >= 1 ? 1 : 2;
   ticks.forEach(t => {
     svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: y(t), y2: y(t), stroke: css('--grid'), 'stroke-width': 1 }));
     const lb = svgEl('text', { x: M.l - 9, y: y(t) + 4, 'text-anchor': 'end', class: 'axis-txt tnum' });
-    lb.textContent = fmt(t, t < 10 ? 2 : 0); svg.appendChild(lb);
+    lb.textContent = fmt(t, axisDec); svg.appendChild(lb);
   });
   months.forEach((m, i) => {
     const lb = svgEl('text', { x: x(i), y: H - 9, 'text-anchor': 'middle', class: 'axis-txt' });
     lb.textContent = m; svg.appendChild(lb);
   });
 
+  const endLabels = [];
   series.forEach(s => {
     const pts = s.points.map((p, i) => ({ ...p, x: x(i), y: p.v === null ? null : y(p.v) })).filter(p => p.y !== null);
     if (pts.length > 1) {
@@ -367,13 +371,24 @@ function chartTrend(rows) {
       svg.appendChild(hit);
     });
     const last = pts[pts.length - 1];
-    if (last) {
-      const lb = svgEl('text', { x: last.x + 9, y: last.y + 4, class: 'val-txt tnum' });
-      lb.textContent = fmt(last.v, 2); svg.appendChild(lb);
-    }
+    if (last) endLabels.push({ x: last.x, y: last.y, v: last.v });
+
     const key = document.createElement('span');
     key.innerHTML = `<i style="background:${s.color}"></i>${s.name}`;
     legend.appendChild(key);
+  });
+
+  // Direct end-labels only where they do not collide. Converging lines get no
+  // label rather than a stacked pile detached from its line - the legend and
+  // the hover tooltip carry those values instead.
+  endLabels.sort((a, b) => a.y - b.y);
+  let lastY = -Infinity;
+  endLabels.forEach(p => {
+    if (p.y - lastY < 15) return;
+    lastY = p.y;
+    const lb = svgEl('text', { x: p.x + 9, y: p.y + 4, class: 'val-txt tnum' });
+    lb.textContent = fmt(p.v, 2);
+    svg.appendChild(lb);
   });
   svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: y(0), y2: y(0), stroke: css('--axis'), 'stroke-width': 1 }));
 }

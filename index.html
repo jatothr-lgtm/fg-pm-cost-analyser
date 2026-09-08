@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FG / PM Cost Analyser</title>
+<meta name="description" content="Upload a production Excel extract and get packaging-material cost per kg by month, item group and warehouse.">
+<style>
+/* ---------------------------------------------------------------- tokens */
+:root{
+  color-scheme: light;
+  --plane:#f9f9f7;
+  --surface-1:#fcfcfb;
+  --surface-2:#f3f2ee;
+  --text-primary:#0b0b0b;
+  --text-secondary:#52514e;
+  --text-muted:#898781;
+  --grid:#e1e0d9;
+  --axis:#c3c2b7;
+  --border:rgba(11,11,11,.10);
+  --border-strong:rgba(11,11,11,.18);
+  --series-1:#2a78d6; --series-2:#eb6834; --series-3:#1baf7a;
+  --series-4:#eda100; --series-5:#e87ba4;
+  --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b;
+  --success-text:#006300;
+  --accent:#2a78d6;
+  --accent-wash:rgba(42,120,214,.09);
+  --shadow:0 1px 2px rgba(11,11,11,.05), 0 8px 24px -12px rgba(11,11,11,.16);
+  --radius:10px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --plane:#0d0d0d; --surface-1:#1a1a19; --surface-2:#222220;
+    --text-primary:#fff; --text-secondary:#c3c2b7; --text-muted:#898781;
+    --grid:#2c2c2a; --axis:#383835;
+    --border:rgba(255,255,255,.10); --border-strong:rgba(255,255,255,.20);
+    --series-1:#3987e5; --series-2:#d95926; --series-3:#199e70;
+    --series-4:#c98500; --series-5:#d55181;
+    --success-text:#0ca30c;
+    --accent:#3987e5; --accent-wash:rgba(57,135,229,.16);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --plane:#0d0d0d; --surface-1:#1a1a19; --surface-2:#222220;
+  --text-primary:#fff; --text-secondary:#c3c2b7; --text-muted:#898781;
+  --grid:#2c2c2a; --axis:#383835;
+  --border:rgba(255,255,255,.10); --border-strong:rgba(255,255,255,.20);
+  --series-1:#3987e5; --series-2:#d95926; --series-3:#199e70;
+  --series-4:#c98500; --series-5:#d55181;
+  --success-text:#0ca30c;
+  --accent:#3987e5; --accent-wash:rgba(57,135,229,.16);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.7);
+}
+
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;padding:0}
+body{
+  background:var(--plane); color:var(--text-primary);
+  font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3{margin:0;font-weight:600;letter-spacing:-.011em}
+button{font:inherit;color:inherit}
+.tnum{font-variant-numeric:tabular-nums}
+
+/* ---------------------------------------------------------------- shell */
+.wrap{max-width:1360px;margin:0 auto;padding:0 24px 72px}
+header.top{
+  position:sticky;top:0;z-index:40;background:var(--plane);
+  border-bottom:1px solid var(--border);
+}
+.top-in{max-width:1360px;margin:0 auto;padding:14px 24px;display:flex;align-items:center;gap:14px}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.mark{
+  width:26px;height:26px;border-radius:7px;flex:none;
+  background:linear-gradient(145deg,var(--series-1),var(--series-3));
+}
+.brand h1{font-size:15px}
+.brand .sub{font-size:12px;color:var(--text-muted);margin-top:1px}
+.top-actions{margin-left:auto;display:flex;align-items:center;gap:8px}
+
+.btn{
+  display:inline-flex;align-items:center;gap:7px;
+  padding:8px 14px;border-radius:8px;border:1px solid var(--border-strong);
+  background:var(--surface-1);cursor:pointer;font-size:13px;font-weight:500;
+  transition:background .12s,border-color .12s;
+}
+.btn:hover{background:var(--surface-2)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{filter:brightness(1.07)}
+.btn.icon{padding:8px 10px}
+
+/* ---------------------------------------------------------------- upload */
+.drop{
+  margin:40px 0;padding:52px 28px;border-radius:16px;text-align:center;
+  border:1.5px dashed var(--border-strong);background:var(--surface-1);
+  transition:border-color .15s,background .15s;
+}
+.drop.over{border-color:var(--accent);background:var(--accent-wash)}
+.drop h2{font-size:19px;margin-bottom:8px}
+.drop p{color:var(--text-secondary);margin:0 auto 22px;max-width:52ch}
+.drop .hint{font-size:12px;color:var(--text-muted);margin-top:20px}
+.reqs{
+  display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:14px;
+}
+.chip{
+  font-size:11.5px;padding:3px 9px;border-radius:99px;
+  background:var(--surface-2);color:var(--text-secondary);border:1px solid var(--border);
+}
+
+/* ---------------------------------------------------------------- status */
+.bar{
+  display:flex;align-items:flex-start;gap:11px;padding:13px 16px;border-radius:var(--radius);
+  border:1px solid var(--border);background:var(--surface-1);margin-bottom:18px;font-size:13px;
+}
+.bar .dot{width:9px;height:9px;border-radius:99px;flex:none;margin-top:5px}
+.bar.good{border-color:color-mix(in srgb,var(--good) 40%,var(--border))}
+.bar.good .dot{background:var(--good)}
+.bar.critical{border-color:color-mix(in srgb,var(--critical) 45%,var(--border))}
+.bar.critical .dot{background:var(--critical)}
+.bar.warning .dot{background:var(--warning)}
+.bar b{font-weight:600}
+.bar .muted{color:var(--text-secondary)}
+
+/* ---------------------------------------------------------------- tiles */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(184px,1fr));gap:12px;margin-bottom:20px}
+.tile{
+  background:var(--surface-1);border:1px solid var(--border);border-radius:var(--radius);
+  padding:15px 16px;box-shadow:var(--shadow);
+}
+.tile .label{font-size:11.5px;color:var(--text-muted);letter-spacing:.02em;text-transform:uppercase}
+.tile .value{font-size:25px;font-weight:600;margin-top:7px;letter-spacing:-.02em;line-height:1.15}
+.tile .note{font-size:11.5px;color:var(--text-secondary);margin-top:5px}
+
+/* ---------------------------------------------------------------- controls */
+.controls{
+  display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;
+  background:var(--surface-1);border:1px solid var(--border);border-radius:var(--radius);
+  padding:13px 15px;margin-bottom:20px;
+}
+.field{display:flex;flex-direction:column;gap:5px;min-width:0}
+.field label{font-size:11.5px;color:var(--text-muted);letter-spacing:.02em;text-transform:uppercase}
+select,input[type=search]{
+  font:inherit;font-size:13px;padding:7px 10px;border-radius:7px;
+  border:1px solid var(--border-strong);background:var(--surface-1);color:var(--text-primary);
+  min-width:150px;max-width:280px;
+}
+.seg{display:inline-flex;border:1px solid var(--border-strong);border-radius:7px;overflow:hidden}
+.seg button{
+  padding:7px 12px;background:var(--surface-1);border:0;cursor:pointer;font-size:12.5px;
+  border-right:1px solid var(--border);
+}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed=true]{background:var(--accent);color:#fff}
+.spacer{margin-left:auto}
+
+/* ---------------------------------------------------------------- charts */
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:14px;margin-bottom:22px}
+.card{
+  background:var(--surface-1);border:1px solid var(--border);border-radius:var(--radius);
+  padding:17px 18px 12px;box-shadow:var(--shadow);min-width:0;
+}
+.card.wide{grid-column:1/-1}
+.card h3{font-size:14px}
+.card .csub{font-size:12px;color:var(--text-muted);margin-top:3px;margin-bottom:12px}
+.card figure{margin:0}
+svg.chart{display:block;width:100%;overflow:visible}
+.legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;font-size:12px;color:var(--text-secondary)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:11px;height:11px;border-radius:3px;display:inline-block}
+.axis-txt{fill:var(--text-muted);font-size:11px}
+.val-txt{fill:var(--text-secondary);font-size:11px;font-weight:500}
+
+.tip{
+  position:fixed;z-index:90;pointer-events:none;opacity:0;transition:opacity .1s;
+  background:var(--surface-1);border:1px solid var(--border-strong);border-radius:8px;
+  padding:9px 11px;font-size:12px;box-shadow:var(--shadow);max-width:280px;
+}
+.tip.on{opacity:1}
+.tip .th{font-weight:600;margin-bottom:5px}
+.tip .tr{display:flex;justify-content:space-between;gap:14px;color:var(--text-secondary)}
+.tip .tr b{color:var(--text-primary);font-weight:500}
+
+/* ---------------------------------------------------------------- tables */
+.tabs{display:flex;gap:2px;flex-wrap:wrap;border-bottom:1px solid var(--border);margin-bottom:0}
+.tabs button{
+  padding:9px 14px;background:none;border:0;border-bottom:2px solid transparent;
+  cursor:pointer;font-size:13px;color:var(--text-secondary);
+}
+.tabs button[aria-selected=true]{color:var(--text-primary);border-bottom-color:var(--accent);font-weight:500}
+.tablewrap{
+  background:var(--surface-1);border:1px solid var(--border);border-top:0;
+  border-radius:0 0 var(--radius) var(--radius);box-shadow:var(--shadow);
+}
+.tabbar{display:flex;gap:10px;align-items:center;padding:11px 14px;border-bottom:1px solid var(--border)}
+.scroll{overflow:auto;max-height:560px}
+table{border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px}
+th,td{padding:8px 11px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--grid)}
+th:first-child,td:first-child,th.txt,td.txt{text-align:left}
+thead th{
+  position:sticky;top:0;z-index:2;background:var(--surface-2);
+  font-weight:600;font-size:11.5px;color:var(--text-secondary);
+}
+tbody tr:hover td{background:var(--accent-wash)}
+tbody tr.total td{font-weight:600;background:var(--surface-2)}
+td.num{font-variant-numeric:tabular-nums}
+.empty{padding:34px;text-align:center;color:var(--text-muted)}
+.pager{display:flex;gap:10px;align-items:center;padding:10px 14px;border-top:1px solid var(--border);font-size:12.5px;color:var(--text-secondary)}
+
+.overlay{
+  position:fixed;inset:0;z-index:100;background:color-mix(in srgb,var(--plane) 86%,transparent);
+  display:none;align-items:center;justify-content:center;backdrop-filter:blur(2px);
+}
+.overlay.on{display:flex}
+.panel{text-align:center;max-width:340px}
+.track{height:5px;border-radius:99px;background:var(--surface-2);overflow:hidden;margin-top:16px}
+.fill{height:100%;width:0;background:var(--accent);transition:width .25s}
+.err{
+  border:1px solid color-mix(in srgb,var(--critical) 45%,var(--border));
+  background:var(--surface-1);border-radius:var(--radius);padding:16px 18px;margin:20px 0;
+}
+.err h3{color:var(--critical);font-size:14px;margin-bottom:7px}
+.err pre{white-space:pre-wrap;font-size:12px;color:var(--text-secondary);margin:0;font-family:inherit}
+.hide{display:none!important}
+@media (max-width:720px){
+  .wrap{padding:0 14px 56px}
+  .top-in{padding:12px 14px}
+  .charts{grid-template-columns:1fr}
+  .brand .sub{display:none}
+}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="top-in">
+    <div class="brand">
+      <div class="mark" aria-hidden="true"></div>
+      <div>
+        <h1>FG / PM Cost Analyser</h1>
+        <div class="sub">Packaging-material cost per kg by month, item group and warehouse</div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button class="btn icon" id="theme" title="Toggle theme" aria-label="Toggle theme">◐</button>
+      <button class="btn" id="reset" hidden>New file</button>
+      <button class="btn primary" id="download" hidden>Download Excel</button>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- upload ------------------------------------------------------------ -->
+  <section id="upload">
+    <div class="drop" id="drop">
+      <h2>Drop your production extract here</h2>
+      <p>The first sheet is read in file order. Nothing is uploaded &mdash; the workbook is parsed
+         and calculated entirely inside your browser.</p>
+      <button class="btn primary" id="pick">Choose Excel file</button>
+      <input type="file" id="file" accept=".xlsx,.xls,.xlsm" hidden>
+      <div class="reqs">
+        <span class="chip">Workorder</span><span class="chip">Item Group</span>
+        <span class="chip">Item Type</span><span class="chip">Qty</span>
+        <span class="chip">Total Amount</span><span class="chip">Value In FG</span>
+        <span class="chip">PKG</span><span class="chip">Date or Month</span>
+        <span class="chip">Target / Source Warehouse</span>
+      </div>
+      <div class="hint">.xlsx, .xls or .xlsm &middot; 100,000+ rows is fine</div>
+    </div>
+    <div id="err" class="err hide"><h3>Could not read that file</h3><pre id="errmsg"></pre></div>
+  </section>
+
+  <!-- dashboard --------------------------------------------------------- -->
+  <section id="dash" hidden>
+    <div id="statusbar"></div>
+    <div class="tiles" id="tiles"></div>
+
+    <div class="controls">
+      <div class="field">
+        <label for="fMonth">Month</label>
+        <select id="fMonth"><option value="">All months</option></select>
+      </div>
+      <div class="field">
+        <label for="fWh">Warehouse</label>
+        <select id="fWh"><option value="">All warehouses</option></select>
+      </div>
+      <div class="field">
+        <label for="fGroup">Item group</label>
+        <select id="fGroup"><option value="">All item groups</option></select>
+      </div>
+      <div class="field">
+        <label for="fWhAxis">Warehouse axis</label>
+        <div class="seg" id="fWhAxis" role="group">
+          <button data-v="targetWh" aria-pressed="true">Target</button>
+          <button data-v="sourceWh" aria-pressed="false">Source</button>
+        </div>
+      </div>
+      <div class="field spacer">
+        <label for="fMode">PM Value bucket</label>
+        <div class="seg" id="fMode" role="group">
+          <button data-v="firstRow" aria-pressed="true">Work order first row</button>
+          <button data-v="fgRow" aria-pressed="false">FG row</button>
+        </div>
+      </div>
+      <div class="field">
+        <label for="fDenom">Cost per kg &divide;</label>
+        <div class="seg" id="fDenom" role="group">
+          <button data-v="pmQty" aria-pressed="true">PM Qty</button>
+          <button data-v="fgQty" aria-pressed="false">FG Qty</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="charts">
+      <div class="card">
+        <h3>PM Value by month</h3>
+        <div class="csub">Packaging spend booked to each month, from PKG rows only</div>
+        <figure><svg class="chart" id="cValue" role="img" aria-label="PM Value by month"></svg></figure>
+      </div>
+      <div class="card">
+        <h3>PM Cost per kg &mdash; top 5 item groups</h3>
+        <div class="csub">Monthly packaging cost per kg; lines end at their latest month</div>
+        <figure><svg class="chart" id="cTrend" role="img" aria-label="PM cost per kg by item group"></svg></figure>
+        <div class="legend" id="lTrend"></div>
+      </div>
+      <div class="card wide">
+        <h3>PM Value by item group</h3>
+        <div class="csub">Largest packaging spend across the selected period</div>
+        <figure><svg class="chart" id="cGroups" role="img" aria-label="PM Value by item group"></svg></figure>
+      </div>
+    </div>
+
+    <div class="tabs" id="tabs" role="tablist">
+      <button role="tab" aria-selected="true"  data-t="target">Monthly Summary</button>
+      <button role="tab" aria-selected="false" data-t="source">Monthly Summary &mdash; Source WH</button>
+      <button role="tab" aria-selected="false" data-t="wo">Workorder Summary</button>
+      <button role="tab" aria-selected="false" data-t="audit">PM Value Audit</button>
+      <button role="tab" aria-selected="false" data-t="multi">Multiple FG Groups</button>
+    </div>
+    <div class="tablewrap">
+      <div class="tabbar">
+        <input type="search" id="search" placeholder="Filter rows…" aria-label="Filter table rows">
+        <span class="spacer" style="font-size:12.5px;color:var(--text-muted)" id="rowcount"></span>
+      </div>
+      <div class="scroll" id="tablehost"></div>
+      <div class="pager hide" id="pager">
+        <button class="btn" id="prev">Previous</button>
+        <button class="btn" id="next">Next</button>
+        <span id="pageinfo"></span>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="panel">
+    <div style="font-size:15px;font-weight:600" id="stage">Working…</div>
+    <div class="track"><div class="fill" id="fill"></div></div>
+  </div>
+</div>
+<div class="tip" id="tip" role="status"></div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

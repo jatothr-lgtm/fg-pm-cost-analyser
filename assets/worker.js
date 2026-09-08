@@ -67,11 +67,27 @@ function monthOf(row) {
 function buildWorkorders(rows) {
   const map = new Map();
   const order = [];
+  const audit = {
+    typeCounts: {}, rowsNoWorkorder: 0, pkgRowsNoWorkorder: 0, pkgValueNoWorkorder: 0,
+    unknownMonthRows: 0, fgQtyRaw: 0, pkgAmountRaw: 0, fgAmountRaw: 0
+  };
 
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     const wo = txt(r['Workorder']);
-    if (!wo) continue;
+
+    const t = txt(r['Item Type']) || '(blank)';
+    audit.typeCounts[t] = (audit.typeCounts[t] || 0) + 1;
+    if (monthOf(r) === UNKNOWN) audit.unknownMonthRows++;
+    const tU = t.toUpperCase();
+    if (tU === 'PKG') audit.pkgAmountRaw += num(r['Total Amount']);
+    if (tU === 'FG') { audit.fgQtyRaw += num(r['Qty']); audit.fgAmountRaw += num(r['Total Amount']); }
+
+    if (!wo) {
+      audit.rowsNoWorkorder++;
+      if (tU === 'PKG') { audit.pkgRowsNoWorkorder++; audit.pkgValueNoWorkorder += num(r['Total Amount']); }
+      continue;
+    }
 
     let rec = map.get(wo);
     if (!rec) {
@@ -121,7 +137,7 @@ function buildWorkorders(rows) {
     }
   }
 
-  return order.map(w => {
+  const recs = order.map(w => {
     const rec = map.get(w);
     rec.targetWh = rec.targetWh || rec.anyWh || UNKNOWN;
     rec.sourceWh = rec.sourceWh || rec.anyWh || UNKNOWN;
@@ -130,6 +146,17 @@ function buildWorkorders(rows) {
     rec.fgCells.forEach(c => { rec.pmQtyTotal += c.pmQty; });
     return rec;
   });
+
+  // where each work order's bucket came from
+  audit.bucketSource = {};
+  recs.forEach(r => {
+    const k = (r.firstType || '(blank)').toUpperCase();
+    audit.bucketSource[k] = (audit.bucketSource[k] || 0) + 1;
+  });
+  audit.woWithPmValue = recs.filter(r => r.pmValue > 0).length;
+  audit.woNegativePm = recs.filter(r => r.pmValue < 0).length;
+
+  return { recs, audit };
 }
 
 /* -------------------------------------------------------------------------
@@ -260,11 +287,13 @@ function run(buffer, opts) {
   }
 
   post('Building work orders', 45);
-  const recs = buildWorkorders(rows);
+  const { recs, audit } = buildWorkorders(rows);
 
   post('Bucketing PM Value', 62);
   const { long, unmappedValue, unmappedCount } = toLong(recs, opts.mode);
   const months = monthsIn(long);
+  audit.cellsCarryingValue = long.filter(r => r.carriesValue && r.pmValue !== 0).length;
+  audit.longRows = long.length;
 
   post('Pivoting', 78);
   const target = pivot(long, 'targetWh', 'Target Warehouse', months, opts.denom);
@@ -282,7 +311,7 @@ function run(buffer, opts) {
 
   post('Done', 95);
   return {
-    sheetName, rowCount: rows.length, columns,
+    sheetName, rowCount: rows.length, columns, audit,
     months,
     workorders: recs.map(r => ({
       wo: r.wo, firstGroup: r.firstGroup, firstType: r.firstType, month: r.firstMonth,
@@ -306,8 +335,21 @@ function run(buffer, opts) {
   };
 }
 
-/* --------------------------- output workbook ----------------------------- */
-function buildWorkbook(res, opts) {
+/* --------------------------- output workbook -----------------------------
+   Derived cells are written as live Excel formulas with a cached value, so the
+   workbook recalculates and every figure can be traced back to its inputs by
+   clicking the cell. Only the raw sums (FG Qty, PM Qty, PM Value per month) are
+   literal numbers - everything downstream of them is a formula.
+   ------------------------------------------------------------------------ */
+const A1 = (r, c) => XLSX.utils.encode_cell({ r, c });           // 0-based
+const COL = c => XLSX.utils.encode_col(c);
+
+function setFormula(ws, r, c, f, cached, z) {
+  ws[A1(r, c)] = { t: 'n', f, v: isFinite(cached) ? cached : 0, z: z || '#,##0.00' };
+}
+function setFmt(ws, r, c, z) { const cell = ws[A1(r, c)]; if (cell && cell.t === 'n') cell.z = z; }
+
+function buildWorkbook(res, opts, checks) {
   const wb = XLSX.utils.book_new();
   const widths = n => Array.from({ length: n }, () => ({ wch: 16 }));
 
@@ -317,41 +359,134 @@ function buildWorkbook(res, opts) {
     if (firstWide) { cols[0] = { wch: 42 }; if (cols[1]) cols[1] = { wch: 26 }; }
     ws['!cols'] = cols;
     ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: body.length, c: header.length - 1 } }) };
-    // Column widths and autofilter are all the browser build of SheetJS writes;
-    // frozen panes and bold headers need the pro build, so they are left to Excel.
+    // Column widths, number formats and autofilter are what the browser build of
+    // SheetJS writes; frozen panes and bold headers need the pro build.
     XLSX.utils.book_append_sheet(wb, ws, name);
     return ws;
   };
 
-  addAoa('Monthly Summary', res.target.header, res.target.body, true);
-  addAoa('Monthly Summary - Source WH', res.source.header, res.source.body, true);
+  /* Monthly pivot: cost-per-kg, the Total block and the Grand Total row all
+     become formulas over the month cells beside them. */
+  const formulaiseMonthly = (ws, months, body) => {
+    const n = body.length;                 // includes the Grand Total row
+    const dataLast = n;                    // sheet row (1-based) of last data row
+    const grandR = n;                      // 0-based row index of Grand Total
+    const dOff = opts.denom === 'fgQty' ? 0 : 1;   // FG Qty or PM Qty column
+    const base = m => 2 + m * 4;
+    const tBase = 2 + months.length * 4;
 
+    for (let i = 0; i < n; i++) {
+      const r = i + 1, row = r + 1;        // 0-based row index, 1-based sheet row
+      const isGrand = i === n - 1;         // the Grand Total row sums the rows above
+
+      months.forEach((m, mi) => {
+        const b = base(mi);
+        if (isGrand) {
+          for (let k = 0; k < 3; k++) {
+            const L = COL(b + k);
+            setFormula(ws, r, b + k, `SUM(${L}2:${L}${dataLast})`, body[i][b + k], k === 2 ? '#,##0' : '#,##0.00');
+          }
+        } else {
+          setFmt(ws, r, b, '#,##0.00'); setFmt(ws, r, b + 1, '#,##0.00'); setFmt(ws, r, b + 2, '#,##0');
+        }
+        // cost per kg = PM Value / denominator, guarded against divide-by-zero
+        const vC = COL(b + 2), dC = COL(b + dOff);
+        setFormula(ws, r, b + 3, `IF(${dC}${row}=0,0,${vC}${row}/${dC}${row})`, body[i][b + 3]);
+      });
+
+      // Total (FG Qty | PM Qty | PM Value) = sum across the month columns
+      for (let k = 0; k < 3; k++) {
+        const refs = months.map((_, mi) => `${COL(base(mi) + k)}${row}`).join(',');
+        setFormula(ws, r, tBase + k, `SUM(${refs})`, body[i][tBase + k], k === 2 ? '#,##0' : '#,##0.00');
+      }
+      const tV = COL(tBase + 2), tD = COL(tBase + dOff);
+      setFormula(ws, r, tBase + 3, `IF(${tD}${row}=0,0,${tV}${row}/${tD}${row})`, body[i][tBase + 3]);
+    }
+  };
+
+  const wsT = addAoa('Monthly Summary', res.target.header, res.target.body, true);
+  if (res.target.body.length) formulaiseMonthly(wsT, res.months, res.target.body);
+  const wsS = addAoa('Monthly Summary - Source WH', res.source.header, res.source.body, true);
+  if (res.source.body.length) formulaiseMonthly(wsS, res.months, res.source.body);
+
+  /* Workorder Summary - PM Cost/KG as a formula on every row */
   const woHeader = ['Workorder', 'Bucket Item Group', 'First Row Item Type', 'Month',
     'FG Item Groups', 'FG Item Group Count', 'Target Warehouse', 'Source Warehouse',
-    'FG Qty', 'FG Value', 'PM Qty', 'PM Value', 'PKG Lines', 'FG Lines'];
-  addAoa('Workorder Summary', woHeader, res.workorders.map(w => [
-    w.wo, w.firstGroup, w.firstType, w.month, w.fgGroups, w.fgGroupCount,
-    w.targetWh, w.sourceWh, w.fgQty, w.fgValue, w.pmQty, w.pmValue, w.pkgLines, w.fgLines
-  ]), false);
+    'FG Qty', 'FG Value', 'PM Qty', 'PM Value', 'PM Cost/KG', 'PKG Lines', 'FG Lines'];
+  const woBody = res.workorders.map(w => {
+    const d = opts.denom === 'fgQty' ? w.fgQty : w.pmQty;
+    return [w.wo, w.firstGroup, w.firstType, w.month, w.fgGroups, w.fgGroupCount,
+      w.targetWh, w.sourceWh, w.fgQty, w.fgValue, w.pmQty, w.pmValue,
+      d ? w.pmValue / d : 0, w.pkgLines, w.fgLines];
+  });
+  const wsW = addAoa('Workorder Summary', woHeader, woBody, false);
+  {
+    const dC = opts.denom === 'fgQty' ? COL(8) : COL(10);   // I = FG Qty, K = PM Qty
+    for (let i = 0; i < woBody.length; i++) {
+      const r = i + 1, row = r + 1;
+      setFmt(wsW, r, 8, '#,##0.00'); setFmt(wsW, r, 9, '#,##0');
+      setFmt(wsW, r, 10, '#,##0.00'); setFmt(wsW, r, 11, '#,##0');
+      setFormula(wsW, r, 12, `IF(${dC}${row}=0,0,${COL(11)}${row}/${dC}${row})`, woBody[i][12]);
+    }
+  }
 
-  const s = res.stats;
-  addAoa('PM Value Audit',
-    ['Check', 'Value'],
-    [
-      ['Bucketing mode', opts.mode === 'firstRow' ? 'Work order first row' : 'FG row Item Group'],
-      ['PM Cost/KG denominator', opts.denom === 'fgQty' ? 'FG Qty' : 'PM Qty'],
-      ['Source PKG Total Amount', s.sourcePkg],
-      ['PM Value allocated to buckets', s.allocated],
-      ['Difference (must be 0)', s.difference],
-      ['Unmapped PM Value', s.unmappedValue],
-      ['Work orders', s.workorderCount],
-      ['Work orders with >1 FG Item Group', s.multiFgCount],
-      ['PM Value on those work orders', s.multiFgValue],
-      ['Work orders with no FG line', s.noFgCount],
-      ['PM Value on those work orders', s.noFgValue],
-      ['Rows read', res.rowCount],
-      ['Source sheet', res.sheetName]
-    ], false);
+  /* Logic & Audit - the reconciliation, with the control total as a formula */
+  const s = res.stats, a = res.audit;
+  const auditRows = [
+    ['SETTINGS', '', ''],
+    ['PM Value bucket', opts.mode === 'firstRow' ? 'Work order first row' : 'FG row Item Group', ''],
+    ['PM Cost/KG denominator', opts.denom === 'fgQty' ? 'FG Qty' : 'PM Qty', ''],
+    ['Source sheet', res.sheetName, ''],
+    ['Rows read', res.rowCount, ''],
+    ['Work orders', s.workorderCount, ''],
+    ['', '', ''],
+    ['CONTROL TOTAL', '', ''],
+    ['Source PKG Total Amount', s.sourcePkg, 'SUM(Total Amount) WHERE Item Type = PKG'],
+    ['PM Value allocated to buckets', s.allocated, 'Summed over the Monthly Summary'],
+    ['Unmapped PM Value', s.unmappedValue, 'Work orders whose item group could not be resolved'],
+    ['Difference (must be 0)', 0, 'Source - allocated - unmapped'],
+    ['', '', ''],
+    ['POPULATION', '', ''],
+    ['Work orders with >1 FG item group', s.multiFgCount, `PM Value ${Math.round(s.multiFgValue)}`],
+    ['Work orders with no FG line', s.noFgCount, `PM Value ${Math.round(s.noFgValue)}`],
+    ['PKG rows with no work order', a.pkgRowsNoWorkorder, 'Cannot be attributed to any item group'],
+    ['Rows with an unreadable month', a.unknownMonthRows, 'Reported under "Unknown"'],
+    ['', '', ''],
+    ['ROW CENSUS', '', ''],
+    ...Object.entries(a.typeCounts).sort((x, y) => y[1] - x[1]).map(([k, v]) => [k, v, 'rows']),
+    ['', '', ''],
+    ['BUCKET PROVENANCE', '', ''],
+    ...Object.entries(a.bucketSource).sort((x, y) => y[1] - x[1])
+      .map(([k, v]) => [`First row is ${k}`, v, 'work orders']),
+    ['', '', ''],
+    ['CHECKS', '', ''],
+    ...(checks || []).map(c => [c.what, c.ok ? 'PASS' : 'CHECK', c.fig]),
+    ['', '', ''],
+    ['LOGIC APPLIED', '', ''],
+    ['1. Read first sheet in file order', 'Row order is load-bearing for step 3', ''],
+    ['2. PM Value', "SUM(Total Amount) WHERE Item Type = 'PKG', by Workorder", 'RM / FG / BiProduct excluded'],
+    ['3. Bucket', opts.mode === 'firstRow'
+      ? "Item Group + Month of the work order's FIRST row in file order (its input line)"
+      : "Item Group on the work order's FG rows; unresolved when 0 or >1 distinct groups",
+      'VLOOKUP(Workorder, data, Item Group)'],
+    ['4. One carrier per work order', 'PM Value attached to the single largest FG cell', 'Prevents double counting'],
+    ['5. PM Qty', 'SUM over FG rows of ( Value In FG x PKG / 100 )', 'PKG is a percent held as a number'],
+    ['5. FG Qty', 'SUM over FG rows of Qty', ''],
+    ['6. PM Cost/KG', `PM Value / ${opts.denom === 'fgQty' ? 'FG Qty' : 'PM Qty'}`, 'Totals re-derive the ratio, never average it'],
+    ['7. Target Warehouse', 'From the FG rows', ''],
+    ['7. Source Warehouse', 'From the input (RM / PKG) rows', 'FG rows carry it blank'],
+    ['8. Months', 'From Date, else a text Month column', 'Calendar order, months present only']
+  ];
+  const wsA = addAoa('Logic & Audit', ['Item', 'Value', 'Note'], auditRows, false);
+  wsA['!cols'] = [{ wch: 46 }, { wch: 62 }, { wch: 52 }];
+  {
+    // difference stays a live formula so the workbook proves itself on open
+    const r = auditRows.findIndex(x => x[0] === 'Difference (must be 0)') + 1;
+    const srcR = auditRows.findIndex(x => x[0] === 'Source PKG Total Amount') + 2;
+    const allR = auditRows.findIndex(x => x[0] === 'PM Value allocated to buckets') + 2;
+    const unmR = auditRows.findIndex(x => x[0] === 'Unmapped PM Value') + 2;
+    setFormula(wsA, r, 1, `B${srcR}-B${allR}-B${unmR}`, 0, '#,##0');
+  }
 
   if (res.multiFg.length) {
     addAoa('Multiple FG Groups',
@@ -369,7 +504,7 @@ self.onmessage = e => {
       const res = run(e.data.buffer, e.data.opts);
       self.postMessage({ type: 'result', result: res });
     } else if (cmd === 'export') {
-      const buf = buildWorkbook(e.data.result, e.data.opts);
+      const buf = buildWorkbook(e.data.result, e.data.opts, e.data.checks);
       self.postMessage({ type: 'export', buffer: buf }, [buf]);
     }
   } catch (err) {

@@ -210,6 +210,55 @@ tbody tr:hover td{background:var(--accent-wash)}
 tbody tr.total td{font-weight:600;background:var(--surface-2)}
 td.num{font-variant-numeric:tabular-nums}
 .empty{padding:34px;text-align:center;color:var(--text-muted)}
+
+/* ------------------------------------------------------- logic & audit */
+.doc{padding:22px 26px 30px;max-width:1000px}
+.doc h4{
+  font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);
+  margin:30px 0 12px;font-weight:600;
+}
+.doc h4:first-child{margin-top:0}
+.doc p{margin:0 0 12px;color:var(--text-secondary);max-width:78ch}
+.doc code{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;
+  background:var(--surface-2);padding:1px 5px;border-radius:4px;color:var(--text-primary);
+}
+.doc pre{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;
+  background:var(--surface-2);border:1px solid var(--border);border-radius:8px;
+  padding:12px 14px;overflow-x:auto;margin:0 0 14px;color:var(--text-primary);line-height:1.6;
+}
+.checks{width:100%;border-collapse:separate;border-spacing:0;margin-bottom:8px}
+.checks td{
+  border-bottom:1px solid var(--grid);padding:11px 12px;vertical-align:top;
+  text-align:left;white-space:normal;overflow-wrap:anywhere;
+}
+.checks tr:last-child td{border-bottom:0}
+.checks td.st{width:104px;white-space:nowrap}
+.checks td.fig{
+  text-align:right;font-variant-numeric:tabular-nums;color:var(--text-secondary);
+  white-space:normal;min-width:120px;max-width:220px;
+}
+.checks .what{font-weight:500}
+.checks .why{color:var(--text-muted);font-size:12px;margin-top:3px;max-width:62ch}
+.pill{
+  display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;
+  padding:3px 9px;border-radius:99px;border:1px solid;
+}
+.pill.pass{color:var(--success-text);border-color:color-mix(in srgb,var(--good) 45%,transparent);background:color-mix(in srgb,var(--good) 9%,transparent)}
+.pill.fail{color:var(--critical);border-color:color-mix(in srgb,var(--critical) 50%,transparent);background:color-mix(in srgb,var(--critical) 9%,transparent)}
+.pill.info{color:var(--text-secondary);border-color:var(--border-strong);background:var(--surface-2)}
+.rule{
+  display:grid;grid-template-columns:26px 1fr;gap:12px;margin-bottom:16px;align-items:start;
+}
+.rule .n{
+  width:24px;height:24px;border-radius:99px;background:var(--surface-2);border:1px solid var(--border);
+  display:grid;place-items:center;font-size:11.5px;font-weight:600;color:var(--text-secondary);
+}
+.rule .b{min-width:0}
+.rule .t{font-weight:600;margin-bottom:5px}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:26px}
+@media (max-width:800px){.split{grid-template-columns:1fr}}
 .pager{display:flex;gap:10px;align-items:center;padding:10px 14px;border-top:1px solid var(--border);font-size:12.5px;color:var(--text-secondary)}
 
 .overlay{
@@ -340,7 +389,7 @@ td.num{font-variant-numeric:tabular-nums}
       <button role="tab" aria-selected="true"  data-t="target">Monthly Summary</button>
       <button role="tab" aria-selected="false" data-t="source">Monthly Summary &mdash; Source WH</button>
       <button role="tab" aria-selected="false" data-t="wo">Workorder Summary</button>
-      <button role="tab" aria-selected="false" data-t="audit">PM Value Audit</button>
+      <button role="tab" aria-selected="false" data-t="audit">Logic &amp; Audit</button>
       <button role="tab" aria-selected="false" data-t="multi">Multiple FG Groups</button>
     </div>
     <div class="tablewrap">

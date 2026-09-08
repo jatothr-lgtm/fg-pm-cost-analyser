@@ -103,14 +103,49 @@ is true by construction. The dashboard shows both figures and their difference; 
 | `Monthly Summary` | Target Warehouse × FG Item Group × month |
 | `Monthly Summary - Source WH` | Source Warehouse × FG Item Group × month |
 | `Workorder Summary` | one row per work order, pre-aggregation |
-| `PM Value Audit` | control totals and run settings |
+| `Logic & Audit` | every rule applied, the row census, and the reconciliation |
 | `Multiple FG Groups` | work orders with more than one distinct FG Item Group |
 
 Only months actually present in the data get columns, in calendar order.
 
-The downloaded workbook carries **column widths and autofilter**. Frozen panes and
-bold headers are not written — the browser build of SheetJS cannot emit them, and
-adding a server just to style a header row was not worth the infrastructure.
+### Live formulas
+
+Every derived cell is written as a **real Excel formula with a cached value**, so the
+workbook recalculates and any figure can be traced by clicking the cell. Only the raw
+monthly sums are literal numbers; everything downstream of them is a formula:
+
+```
+PM Cost/KG        =IF(D2=0,0,E2/D2)          value ÷ denominator, divide-by-zero guarded
+Total (PM Value)  =SUM(E2,I2,M2,Q2)          across the month columns
+Grand Total       =SUM(E2:E125)              down the item-group rows
+Audit difference  =B10-B11-B12               source − allocated − unmapped, must read 0
+```
+
+Column widths, number formats and autofilter are also written. Frozen panes and bold
+headers are not — the browser build of SheetJS cannot emit them, and adding a server
+just to style a header row was not worth the infrastructure.
+
+## Believing the numbers
+
+The **Logic & Audit** tab recomputes eleven reconciliation checks from the loaded file
+every time a setting changes, and each one states what would be wrong if it failed:
+
+1. Allocated + unmapped equals the source PKG total — no value vanished.
+2. Nothing is left unallocated.
+3. The source total re-adds independently from the raw rows.
+4. No work order is counted twice — carrier cells equal distinct work orders.
+5. The monthly figures re-add to the total.
+6. The Target and Source warehouse views total identically.
+7. FG Qty ties back to a plain sum of Qty over the FG rows.
+8. Every PKG row carries a work order.
+9. No negative packaging value.
+10. Every row is classified by Item Type.
+11. Every row lands in a real month.
+
+Alongside them the tab shows a **row census** (where all the rows went) and **bucket
+provenance** (which line each work order took its item group from), so the reported
+figures can be walked back to the source rows without leaving the page. The same
+content is written to the `Logic & Audit` sheet of the download.
 
 ## Notes
 

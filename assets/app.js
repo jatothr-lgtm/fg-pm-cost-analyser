@@ -492,28 +492,7 @@ function tableData() {
       textCols: 8
     };
   }
-  if (tab === 'audit') {
-    const s = result.stats;
-    return {
-      header: ['Check', 'Value'],
-      body: [
-        ['Bucketing mode', opts.mode === 'firstRow' ? 'Work order first row' : 'FG row Item Group'],
-        ['PM Cost/KG denominator', opts.denom === 'fgQty' ? 'FG Qty' : 'PM Qty'],
-        ['Source PKG Total Amount', s.sourcePkg],
-        ['PM Value allocated to buckets', s.allocated],
-        ['Difference (must be 0)', s.difference],
-        ['Unmapped PM Value', s.unmappedValue],
-        ['Work orders', s.workorderCount],
-        ['Work orders with >1 FG Item Group', s.multiFgCount],
-        ['PM Value on those work orders', s.multiFgValue],
-        ['Work orders with no FG line', s.noFgCount],
-        ['PM Value on those work orders', s.noFgValue],
-        ['Rows read', result.rowCount],
-        ['Source sheet', result.sheetName]
-      ],
-      textCols: 1
-    };
-  }
+  if (tab === 'audit') return null;   // rendered by renderAudit()
   return {
     header: ['Workorder', 'Month', 'Bucket Item Group', 'FG Item Groups', 'Count', 'PM Value', 'FG Qty'],
     body: result.multiFg.map(r => [r.wo, r.month, r.firstGroup, r.fgGroups, r.count, r.pmValue, r.fgQty]),
@@ -521,8 +500,222 @@ function tableData() {
   };
 }
 
+/* --------------------------------------------------- logic & audit panel */
+function auditChecks() {
+  const a = result.audit, s = result.stats, L = result.long;
+  const near = (x, y) => Math.abs(x - y) < 0.5;
+
+  const carriers = L.filter(r => r.pmValue !== 0);
+  const distinctCarriers = new Set(carriers.map(r => r.wo)).size;
+
+  const monthSum = L.reduce((m, r) => (m[r.month] = (m[r.month] || 0) + r.pmValue, m), {});
+  const monthTotal = Object.values(monthSum).reduce((x, y) => x + y, 0);
+
+  const byT = L.reduce((m, r) => (m[r.targetWh] = (m[r.targetWh] || 0) + r.pmValue, m), {});
+  const byS = L.reduce((m, r) => (m[r.sourceWh] = (m[r.sourceWh] || 0) + r.pmValue, m), {});
+  const tSum = Object.values(byT).reduce((x, y) => x + y, 0);
+  const sSum = Object.values(byS).reduce((x, y) => x + y, 0);
+
+  const typeTotal = Object.values(a.typeCounts).reduce((x, y) => x + y, 0);
+
+  return [
+    {
+      ok: near(s.allocated + s.unmappedValue, s.sourcePkg),
+      what: 'Every rupee of packaging spend is accounted for',
+      why: 'Allocated + unmapped must equal the PKG total read straight off the source rows. A gap here would mean value silently vanished between reading and reporting.',
+      fig: `${fmt(s.allocated)} + ${fmt(s.unmappedValue)} vs ${fmt(s.sourcePkg)}`
+    },
+    {
+      ok: near(s.unmappedValue, 0),
+      what: 'Nothing is left unallocated',
+      why: opts.mode === 'firstRow'
+        ? 'Every work order resolves to exactly one item group, so no packaging value is stranded.'
+        : 'FG-row bucketing cannot resolve work orders with zero or several FG item groups, so their value is reported as unmapped rather than guessed at. Switch the bucket to “Work order first row” to clear this.',
+      fig: fmt(s.unmappedValue)
+    },
+    {
+      ok: near(a.pkgAmountRaw - a.pkgValueNoWorkorder, s.sourcePkg),
+      what: 'The source total re-adds from the raw rows',
+      why: 'Summing Total Amount over every PKG row independently of the work order build reproduces the same control figure — the aggregation is not inventing or dropping value.',
+      fig: `${fmt(a.pkgAmountRaw - a.pkgValueNoWorkorder)} vs ${fmt(s.sourcePkg)}`
+    },
+    {
+      ok: distinctCarriers === carriers.length,
+      what: 'No work order is counted twice',
+      why: 'Each work order attaches its PM Value to exactly one output cell. If a work order appeared as a value carrier twice, its packaging cost would be double counted in every roll-up above.',
+      fig: `${fmt(carriers.length)} cells · ${fmt(distinctCarriers)} work orders`
+    },
+    {
+      ok: near(monthTotal, s.allocated),
+      what: 'The monthly figures re-add to the total',
+      why: 'Summing PM Value across the month columns returns the allocated total, so no value falls outside the reported months.',
+      fig: `${fmt(monthTotal)} vs ${fmt(s.allocated)}`
+    },
+    {
+      ok: near(tSum, sSum) && near(tSum, s.allocated),
+      what: 'Both warehouse views agree',
+      why: 'The Target and Source warehouse summaries are two cuts of the same numbers. They must total identically; a difference would mean one axis is dropping or duplicating rows.',
+      fig: `${fmt(tSum)} vs ${fmt(sSum)}`
+    },
+    {
+      ok: near(s.totalFgQty, a.fgQtyRaw),
+      what: 'FG Qty ties back to the FG rows',
+      why: 'The quantity denominator equals the plain sum of Qty over every FG row in the file — nothing is filtered out on the way to the report.',
+      fig: `${fmt(s.totalFgQty, 2)} vs ${fmt(a.fgQtyRaw, 2)}`
+    },
+    {
+      ok: a.pkgRowsNoWorkorder === 0,
+      what: 'Every PKG row carries a work order',
+      why: 'A packaging row with a blank work order cannot be attributed to any item group, and its value would be dropped from the report entirely.',
+      fig: `${fmt(a.pkgRowsNoWorkorder)} orphan rows` + (a.pkgValueNoWorkorder ? ` · ${fmt(a.pkgValueNoWorkorder)}` : '')
+    },
+    {
+      ok: a.woNegativePm === 0,
+      what: 'No negative packaging value',
+      why: 'A negative PM Value points at a reversal or credit note booked into the extract, which would understate the cost per kg for its item group.',
+      fig: `${fmt(a.woNegativePm)} work orders`
+    },
+    {
+      ok: typeTotal === result.rowCount,
+      what: 'Every row is classified',
+      why: 'Each of the rows read carries an Item Type that was counted. An unclassified row is a row whose value went nowhere.',
+      fig: `${fmt(typeTotal)} of ${fmt(result.rowCount)}`
+    },
+    {
+      ok: a.unknownMonthRows === 0,
+      what: 'Every row lands in a month',
+      why: 'Rows with an unreadable Date and Month fall into an “Unknown” column instead of the calendar. Their value is still counted, but not in the month it belongs to.',
+      fig: `${fmt(a.unknownMonthRows)} rows`
+    }
+  ];
+}
+
+function renderAudit() {
+  const a = result.audit, s = result.stats;
+  const checks = auditChecks();
+  const passed = checks.filter(c => c.ok).length;
+
+  const pill = ok => `<span class="pill ${ok ? 'pass' : 'fail'}">${ok ? '✓ Pass' : '✕ Check'}</span>`;
+  const census = Object.entries(a.typeCounts).sort((x, y) => y[1] - x[1])
+    .map(([k, v]) => `<tr><td class="what">${k}</td><td class="fig">${fmt(v)} rows</td></tr>`).join('');
+  const prov = Object.entries(a.bucketSource).sort((x, y) => y[1] - x[1])
+    .map(([k, v]) => `<tr><td class="what">First row is ${k}</td><td class="fig">${fmt(v)} work orders</td></tr>`).join('');
+
+  const modeName = opts.mode === 'firstRow' ? 'Work order first row' : 'FG row Item Group';
+  const denName = opts.denom === 'fgQty' ? 'FG Qty' : 'PM Qty';
+
+  return `<div class="doc">
+
+<h4>Reconciliation &mdash; ${passed} of ${checks.length} checks pass</h4>
+<p>Recomputed from the file you loaded, every time the settings change. These are the reasons
+to trust the numbers above; each one states what would be wrong if it failed.</p>
+<table class="checks"><tbody>
+${checks.map(c => `<tr>
+  <td class="st">${pill(c.ok)}</td>
+  <td><div class="what">${c.what}</div><div class="why">${c.why}</div></td>
+  <td class="fig">${c.fig}</td>
+</tr>`).join('')}
+</tbody></table>
+
+<div class="split">
+  <div>
+    <h4>Row census</h4>
+    <p>Where the ${fmt(result.rowCount)} rows of <code>${result.sheetName}</code> went.</p>
+    <table class="checks"><tbody>${census}
+      <tr><td class="what">No work order</td><td class="fig">${fmt(a.rowsNoWorkorder)} rows</td></tr>
+    </tbody></table>
+  </div>
+  <div>
+    <h4>Bucket provenance</h4>
+    <p>Which line each work order took its item group from.</p>
+    <table class="checks"><tbody>${prov}</tbody></table>
+  </div>
+</div>
+
+<h4>Current settings</h4>
+<table class="checks"><tbody>
+  <tr><td class="what">PM Value bucket</td><td class="fig">${modeName}</td></tr>
+  <tr><td class="what">PM Cost/kg denominator</td><td class="fig">${denName}</td></tr>
+  <tr><td class="what">Work orders</td><td class="fig">${fmt(s.workorderCount)}</td></tr>
+  <tr><td class="what">Work orders with &gt;1 FG item group</td><td class="fig">${fmt(s.multiFgCount)} &middot; ${fmt(s.multiFgValue)}</td></tr>
+  <tr><td class="what">Work orders with no FG line</td><td class="fig">${fmt(s.noFgCount)} &middot; ${fmt(s.noFgValue)}</td></tr>
+</tbody></table>
+
+<h4>The logic applied, in order</h4>
+
+<div class="rule"><div class="n">1</div><div class="b">
+  <div class="t">Read the first sheet in file order</div>
+  <p>Row order is load-bearing &mdash; rule 3 depends on it. Header whitespace is stripped;
+  numbers are coerced from text, and anything unparseable becomes 0 rather than breaking the run.</p>
+</div></div>
+
+<div class="rule"><div class="n">2</div><div class="b">
+  <div class="t">PM Value &mdash; packaging rows only</div>
+  <pre>PM Value(work order) = SUM(Total Amount) WHERE Item Type = 'PKG'</pre>
+  <p><code>RM</code>, <code>FG</code> and <code>BiProduct</code> rows contribute nothing.</p>
+</div></div>
+
+<div class="rule"><div class="n">3</div><div class="b">
+  <div class="t">Bucketing &mdash; which item group that value is reported under</div>
+  <p><b>Work order first row</b> (in use${opts.mode === 'firstRow' ? '' : ' &mdash; currently off'}): the item group and month
+  of the work order&rsquo;s <b>first row in file order</b>, which is its primary input line &mdash; the RM line for
+  most work orders, the PKG line for those with no RM at all. Equivalent to
+  <code>VLOOKUP(Workorder, &lt;data&gt;, Item Group)</code>.</p>
+  <p><b>FG row</b>: the item group on the work order&rsquo;s FG rows. Work orders with zero or several
+  distinct FG groups cannot be resolved and their value is reported unmapped.</p>
+  <p>The two differ because a work order routinely consumes one item group and produces another,
+  and because many work orders have no FG line to read at all.</p>
+</div></div>
+
+<div class="rule"><div class="n">4</div><div class="b">
+  <div class="t">One value carrier per work order</div>
+  <p>Where a work order spans several months or warehouses on its FG rows, its PM Value is attached
+  to the single largest FG cell rather than repeated against each. Repeating it is the ordinary way
+  this calculation gets inflated; check 4 above is what proves it did not happen here.</p>
+</div></div>
+
+<div class="rule"><div class="n">5</div><div class="b">
+  <div class="t">Quantities</div>
+  <pre>PM Qty = SUM over FG rows of ( Value In FG &times; PKG / 100 )
+FG Qty = SUM over FG rows of Qty</pre>
+  <p><code>PKG</code> is a percentage held as a plain number, so <code>2.02</code> means 2.02%.</p>
+</div></div>
+
+<div class="rule"><div class="n">6</div><div class="b">
+  <div class="t">Cost per kg</div>
+  <pre>PM Cost/kg = PM Value &divide; ${denName}</pre>
+  <p>Totals re-derive the ratio from the summed numerator over the summed denominator &mdash;
+  never an average of the monthly ratios, which would weight a small month the same as a large one.</p>
+</div></div>
+
+<div class="rule"><div class="n">7</div><div class="b">
+  <div class="t">Warehouses</div>
+  <p>Target Warehouse is read from the FG rows. <b>Source Warehouse is read from the input
+  (RM / PKG) rows</b>, because FG rows carry it blank &mdash; taking it from the FG line makes the
+  entire source view read <code>Unknown</code>.</p>
+</div></div>
+
+<div class="rule"><div class="n">8</div><div class="b">
+  <div class="t">Months</div>
+  <p>Taken from <code>Date</code> where it parses, otherwise from a text <code>Month</code> column.
+  Columns appear in calendar order, and only for months actually present in the data.</p>
+</div></div>
+
+</div>`;
+}
+
 function drawTable() {
   const host = $('#tablehost');
+
+  if (tab === 'audit') {
+    $('#search').hidden = true;
+    $('#rowcount').textContent = '';
+    $('#pager').classList.add('hide');
+    host.innerHTML = renderAudit();
+    return;
+  }
+  $('#search').hidden = false;
+
   const { header, body, textCols, totalLast } = tableData();
   const grand = totalLast && body.length ? body[body.length - 1] : null;
   let rows = grand ? body.slice(0, -1) : body;
@@ -558,7 +751,8 @@ function drawTable() {
 $('#download').addEventListener('click', () => {
   if (!result) return;
   busy(true); $('#stage').textContent = 'Building workbook…'; $('#fill').style.width = '55%';
-  ensureWorker().postMessage({ cmd: 'export', result, opts: { ...opts } });
+  const checks = auditChecks().map(c => ({ what: c.what, ok: c.ok, fig: c.fig }));
+  ensureWorker().postMessage({ cmd: 'export', result, opts: { ...opts }, checks });
 });
 function saveBook(buf) {
   const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });

@@ -36,6 +36,11 @@ const UNKNOWN = 'Unknown';
 
 function post(stage, pct) { self.postMessage({ type: 'progress', stage, pct }); }
 
+let lastRows = null, lastColumns = null;   // raw source, reused by the exporter
+
+// signals that the source will not fit alongside the rest of the workbook
+class RawTooBig extends Error {}
+
 const num = v => {
   if (v === null || v === undefined || v === '') return 0;
   if (typeof v === 'number') return isFinite(v) ? v : 0;
@@ -309,6 +314,11 @@ function run(buffer, opts) {
   }));
   const noFg = recs.filter(r => r.fgGroupCount === 0);
 
+  // kept in the worker so the export can rebuild the Raw Data sheet without
+  // shipping 100k+ rows back and forth across postMessage
+  lastRows = rows;
+  lastColumns = columns;
+
   post('Done', 95);
   return {
     sheetName, rowCount: rows.length, columns, audit,
@@ -365,9 +375,115 @@ function buildWorkbook(res, opts, checks) {
     return ws;
   };
 
+  /* ---------------------------------------------------------------------
+     Raw Data - tab 1. The source rows verbatim, plus helper columns that
+     spell out the disputed rule as an actual VLOOKUP and reduce each row to
+     the three metrics. Every summary cell then sums these columns, so the
+     whole workbook traces back to the source rows without leaving Excel.
+     --------------------------------------------------------------------- */
+  const RAW = 'Raw Data';
+  let rawRefs = null, rawDropped = [], rawOmitted = false;
+  try {
+  if (lastRows && lastRows.length) {
+    const cols = lastColumns;
+    const n = lastRows.length;
+    const lastR = n + 1;                       // 1-based sheet row of last data row
+
+    /* The browser build of SheetJS assembles the whole zip in one buffer, and
+       past roughly 90 MB of sheet XML that allocation fails outright. Every raw
+       ROW is always kept - the audit depends on it. When the sheet would blow
+       the budget we drop trailing source COLUMNS instead, never the columns the
+       PM chain is computed from, and record what went on Logic & Audit. */
+    // Measured against this build of SheetJS: sheet XML runs ~52 bytes a cell,
+    // and the writer dies somewhere past ~90 MB for the workbook as a whole.
+    // 48 MB for Raw Data leaves room for Workorder Summary and the pivots.
+    const BUDGET = 58e6;
+    const CORE = ['Workorder', 'Item Type', 'Total Amount', 'Qty', 'Value In FG', 'PKG'];
+    const PRIORITY = CORE.concat(['Item Group', 'Date', 'Item Name',
+      'Target Warehouse', 'Source Warehouse', 'Item Code']);
+
+    const sample = lastRows.slice(0, 500);
+    const costOf = c => {
+      let t = 0;
+      for (const r of sample) {
+        const v = r[c];
+        t += (typeof v === 'string') ? v.length + 62 : 32;
+      }
+      return (t / sample.length) * lastRows.length;
+    };
+    const cost = {}; for (const c of cols) cost[c] = costOf(c);
+
+    let budget = BUDGET - 70 * lastRows.length;              // the one formula column
+    const keep = new Set();
+    const order = PRIORITY.filter(c => cols.includes(c))
+      .concat(cols.filter(c => !PRIORITY.includes(c)));
+    for (const c of order) if (cost[c] <= budget) { keep.add(c); budget -= cost[c]; }
+
+    // without the core columns the formula chain cannot be written at all
+    if (!CORE.every(c => keep.has(c) || !cols.includes(c))) throw new RawTooBig();
+
+    const kept = cols.filter(c => keep.has(c));               // keep source order
+    rawDropped = cols.filter(c => !keep.has(c));
+
+    const at = name => kept.indexOf(name);
+    const L = name => COL(at(name));
+
+    // PM Value and FG Qty are reachable with SUMIFS on Item Type, so they need
+    // no helper column. PM Qty is a per-row product, which SUMIFS cannot do.
+    const extra = ['PM Qty Row'];
+    const head = kept.concat(extra);
+    const body = lastRows.map(r => {
+      const line = kept.map(c => {
+        const v = r[c];
+        return v instanceof Date ? v : (v === null || v === undefined ? '' : v);
+      });
+      return line.concat([0]);   // overwritten with a formula
+    });
+
+    const ws = XLSX.utils.aoa_to_sheet([head, ...body], { cellDates: true });
+    ws['!cols'] = head.map((h, i) => ({ wch: i < kept.length ? 15 : 18 }));
+    ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: n, c: head.length - 1 } }) };
+
+    const b = kept.length;                     // first helper column index
+    const cWo = L('Workorder'), cIt = L('Item Type'), cQty = L('Qty'),
+          cAmt = L('Total Amount'),
+          cVif = at('Value In FG') >= 0 ? L('Value In FG') : null,
+          cPkg = at('PKG') >= 0 ? L('PKG') : null;
+    for (let i = 0; i < n; i++) {
+      const r = i + 1, row = r + 1;
+      setFormula(ws, r, b,
+        cVif && cPkg ? `IF($${cIt}${row}="FG",$${cVif}${row}*$${cPkg}${row}/100,0)` : '0', 0, '#,##0.00');
+    }
+    XLSX.utils.book_append_sheet(wb, ws, RAW);
+
+    const rr = c => `'${RAW}'!$${c}$2:$${c}$${lastR}`;
+    rawRefs = {
+      wo: rr(cWo), type: rr(cIt), qty: rr(cQty), amt: rr(cAmt), pmq: rr(COL(b))
+    };
+  }
+  } catch (e) {
+    // Too many rows to embed the source and still fit the writer's ceiling.
+    // Drop the sheet rather than ship a truncated one that formulas point at:
+    // a partial Raw Data tab would make every SUMIFS silently wrong.
+    if (!(e instanceof RawTooBig)) throw e;
+    rawOmitted = true; rawRefs = null; rawDropped = [];
+    if (wb.SheetNames.includes(RAW)) {
+      wb.SheetNames = wb.SheetNames.filter(s => s !== RAW);
+      delete wb.Sheets[RAW];
+    }
+  }
+
+  /* Monthly cells sum the Workorder Summary (one row per work order) rather
+     than the 100k+ raw rows - same chain, a fraction of the recalc cost. */
+  const WQ = 'Workorder Summary', wLast = res.workorders.length + 1;
+  const wr = c => `'${WQ}'!$${c}$2:$${c}$${wLast}`;
+  const woRefs = res.workorders.length
+    ? { group: wr('B'), month: wr('D'), twh: wr('G'), swh: wr('H'),
+        fgq: wr('I'), pmq: wr('K'), pmv: wr('L') } : null;
+
   /* Monthly pivot: cost-per-kg, the Total block and the Grand Total row all
      become formulas over the month cells beside them. */
-  const formulaiseMonthly = (ws, months, body) => {
+  const formulaiseMonthly = (ws, months, body, whRef) => {
     const n = body.length;                 // includes the Grand Total row
     const dataLast = n;                    // sheet row (1-based) of last data row
     const grandR = n;                      // 0-based row index of Grand Total
@@ -386,6 +502,13 @@ function buildWorkbook(res, opts, checks) {
             const L = COL(b + k);
             setFormula(ws, r, b + k, `SUM(${L}2:${L}${dataLast})`, body[i][b + k], k === 2 ? '#,##0' : '#,##0.00');
           }
+        } else if (woRefs) {
+          // every metric cell sums the work orders in this warehouse / item
+          // group / month - nothing here is a typed-in number
+          const crit = `${woRefs.group},$B${row},${woRefs.month},"${m}",${whRef},$A${row}`;
+          setFormula(ws, r, b, `SUMIFS(${woRefs.fgq},${crit})`, body[i][b], '#,##0.00');
+          setFormula(ws, r, b + 1, `SUMIFS(${woRefs.pmq},${crit})`, body[i][b + 1], '#,##0.00');
+          setFormula(ws, r, b + 2, `SUMIFS(${woRefs.pmv},${crit})`, body[i][b + 2], '#,##0');
         } else {
           setFmt(ws, r, b, '#,##0.00'); setFmt(ws, r, b + 1, '#,##0.00'); setFmt(ws, r, b + 2, '#,##0');
         }
@@ -405,9 +528,9 @@ function buildWorkbook(res, opts, checks) {
   };
 
   const wsT = addAoa('Monthly Summary', res.target.header, res.target.body, true);
-  if (res.target.body.length) formulaiseMonthly(wsT, res.months, res.target.body);
+  if (res.target.body.length) formulaiseMonthly(wsT, res.months, res.target.body, woRefs && woRefs.twh);
   const wsS = addAoa('Monthly Summary - Source WH', res.source.header, res.source.body, true);
-  if (res.source.body.length) formulaiseMonthly(wsS, res.months, res.source.body);
+  if (res.source.body.length) formulaiseMonthly(wsS, res.months, res.source.body, woRefs && woRefs.swh);
 
   /* Workorder Summary - PM Cost/KG as a formula on every row */
   const woHeader = ['Workorder', 'Bucket Item Group', 'First Row Item Type', 'Month',
@@ -422,10 +545,19 @@ function buildWorkbook(res, opts, checks) {
   const wsW = addAoa('Workorder Summary', woHeader, woBody, false);
   {
     const dC = opts.denom === 'fgQty' ? COL(8) : COL(10);   // I = FG Qty, K = PM Qty
+    const woCol = rawRefs ? rawRefs.wo : null;
     for (let i = 0; i < woBody.length; i++) {
       const r = i + 1, row = r + 1;
-      setFmt(wsW, r, 8, '#,##0.00'); setFmt(wsW, r, 9, '#,##0');
-      setFmt(wsW, r, 10, '#,##0.00'); setFmt(wsW, r, 11, '#,##0');
+      if (woCol) {
+        // roll each work order up out of the Raw Data rows that belong to it -
+        // the Item Type filter is the rule itself, written out in the cell
+        setFormula(wsW, r, 8, `SUMIFS(${rawRefs.qty},${woCol},$A${row},${rawRefs.type},"FG")`, woBody[i][8], '#,##0.00');
+        setFormula(wsW, r, 10, `SUMIFS(${rawRefs.pmq},${woCol},$A${row})`, woBody[i][10], '#,##0.00');
+        setFormula(wsW, r, 11, `SUMIFS(${rawRefs.amt},${woCol},$A${row},${rawRefs.type},"PKG")`, woBody[i][11], '#,##0');
+      } else {
+        setFmt(wsW, r, 8, '#,##0.00'); setFmt(wsW, r, 10, '#,##0.00'); setFmt(wsW, r, 11, '#,##0');
+      }
+      setFmt(wsW, r, 9, '#,##0');
       setFormula(wsW, r, 12, `IF(${dC}${row}=0,0,${COL(11)}${row}/${dC}${row})`, woBody[i][12]);
     }
   }
@@ -439,6 +571,14 @@ function buildWorkbook(res, opts, checks) {
     ['Source sheet', res.sheetName, ''],
     ['Rows read', res.rowCount, ''],
     ['Work orders', s.workorderCount, ''],
+    ['Raw Data tab', rawOmitted ? 'omitted - source too large to embed'
+        : `all ${res.rowCount.toLocaleString('en-IN')} rows`,
+      rawOmitted ? 'Summary cells sum Workorder Summary, which is complete'
+                 : 'Summary cells trace back to it'],
+    ['Raw Data columns omitted', rawOmitted ? 'n/a' : (rawDropped.length ? rawDropped.join(', ') : 'none'),
+      rawDropped.length && !rawOmitted
+        ? 'Every row kept; these columns dropped to stay inside the writer size limit'
+        : 'Every source column written'],
     ['', '', ''],
     ['CONTROL TOTAL', '', ''],
     ['Source PKG Total Amount', s.sourcePkg, 'SUM(Total Amount) WHERE Item Type = PKG'],
@@ -480,12 +620,18 @@ function buildWorkbook(res, opts, checks) {
   const wsA = addAoa('Logic & Audit', ['Item', 'Value', 'Note'], auditRows, false);
   wsA['!cols'] = [{ wch: 46 }, { wch: 62 }, { wch: 52 }];
   {
-    // difference stays a live formula so the workbook proves itself on open
-    const r = auditRows.findIndex(x => x[0] === 'Difference (must be 0)') + 1;
-    const srcR = auditRows.findIndex(x => x[0] === 'Source PKG Total Amount') + 2;
-    const allR = auditRows.findIndex(x => x[0] === 'PM Value allocated to buckets') + 2;
-    const unmR = auditRows.findIndex(x => x[0] === 'Unmapped PM Value') + 2;
-    setFormula(wsA, r, 1, `B${srcR}-B${allR}-B${unmR}`, 0, '#,##0');
+    // the control total proves itself on open: source is summed straight off
+    // Raw Data, allocated is read off the Monthly Summary grand total row
+    const rowOf = label => auditRows.findIndex(x => x[0] === label) + 1;
+    const srcR = rowOf('Source PKG Total Amount'), allR = rowOf('PM Value allocated to buckets');
+    const unmR = rowOf('Unmapped PM Value'), difR = rowOf('Difference (must be 0)');
+    if (rawRefs) setFormula(wsA, srcR, 1,
+      `SUMIF(${rawRefs.type},"PKG",${rawRefs.amt})`, s.sourcePkg, '#,##0');
+    if (res.target.body.length) {
+      const tCol = COL(2 + res.months.length * 4 + 2);
+      setFormula(wsA, allR, 1, `'Monthly Summary'!${tCol}${res.target.body.length + 1}`, s.allocated, '#,##0');
+    }
+    setFormula(wsA, difR, 1, `B${srcR + 1}-B${allR + 1}-B${unmR + 1}`, 0, '#,##0');
   }
 
   if (res.multiFg.length) {
@@ -494,7 +640,12 @@ function buildWorkbook(res, opts, checks) {
       res.multiFg.map(r => [r.wo, r.month, r.firstGroup, r.fgGroups, r.count, r.pmValue, r.fgQty]),
       false);
   }
-  return XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  // deflate is not optional at this size: with the raw sheet and its formula
+  // columns the stored-zip buffer runs past what the writer can allocate
+  // At 100k+ raw rows neither of these is optional. bookSST pools the repeated
+  // item / warehouse strings instead of inlining them on every row, and deflate
+  // keeps the assembled zip inside what the writer can allocate.
+  return XLSX.write(wb, { bookType: 'xlsx', type: 'array', compression: true });
 }
 
 self.onmessage = e => {
@@ -508,6 +659,6 @@ self.onmessage = e => {
       self.postMessage({ type: 'export', buffer: buf }, [buf]);
     }
   } catch (err) {
-    self.postMessage({ type: 'error', message: err && err.message ? err.message : String(err) });
+    self.postMessage({ type: 'error', message: (err && err.message ? err.message : String(err)) + (err && err.stack ? '\n\n' + err.stack : '') });
   }
 };

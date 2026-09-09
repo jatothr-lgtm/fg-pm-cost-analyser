@@ -7,6 +7,10 @@
 (() => {
 'use strict';
 
+// bumped whenever worker.js changes, so browsers never run a cached worker
+const BUILD = '7';
+self.__BUILD = BUILD;
+
 const $ = s => document.querySelector(s);
 const el = (t, a = {}, kids = []) => {
   const n = document.createElementNS(t === 'div' || t === 'span' ? 'http://www.w3.org/1999/xhtml' : 'http://www.w3.org/2000/svg', t);
@@ -42,7 +46,7 @@ const PAGE = 200;
 
 function ensureWorker() {
   if (worker) return worker;
-  worker = new Worker('assets/worker.js');
+  worker = new Worker('assets/worker.js?v=' + BUILD);
   worker.onmessage = e => {
     const m = e.data;
     if (m.type === 'progress') { $('#stage').textContent = m.stage + '…'; $('#fill').style.width = m.pct + '%'; }

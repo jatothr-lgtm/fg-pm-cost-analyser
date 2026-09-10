@@ -108,10 +108,12 @@ const totalCostOf = (row, hasTotalCost) => hasTotalCost
 const pkgCostOf = (row, hasTotalCost) => totalCostOf(row, hasTotalCost) * num(row['PKG']) / 100;
 
 /* -------------------------------------------------------------------------
-   Aggregate. One pass over the rows, FG only, keyed by Item Group + Month.
+   Aggregate. One pass over the rows, FG only, keyed by Item Group + Month +
+   Target Warehouse. The warehouse only makes the grain finer - every total
+   downstream sums the same cells, so no existing figure moves.
    ------------------------------------------------------------------------- */
 function aggregate(rows, hasTotalCost) {
-  const cells = new Map();                 // "group|month" -> cell
+  const cells = new Map();                 // "group|month|warehouse" -> cell
   const audit = {
     typeCounts: {}, fgRows: 0, unknownMonthRows: 0, blankPkgRows: 0,
     negativeCostRows: 0, qtyTotal: 0, costTotal: 0,
@@ -146,9 +148,12 @@ function aggregate(rows, hasTotalCost) {
       if (diff > audit.recomputeMaxDiff) audit.recomputeMaxDiff = diff;
     }
 
-    const key = group + '||' + month;
+    const wh = txt(r['Target Warehouse']) || UNKNOWN;
+    const key = group + '||' + month + '||' + wh;
     let c = cells.get(key);
-    if (!c) cells.set(key, c = { group, month, monthNum: MONTH_NUM[month] || 99, qty: 0, cost: 0, rows: 0 });
+    if (!c) cells.set(key, c = {
+      group, month, monthNum: MONTH_NUM[month] || 99, targetWh: wh, qty: 0, cost: 0, rows: 0
+    });
     c.qty += qty; c.cost += cost; c.rows++;
   }
 
@@ -163,34 +168,48 @@ const ratio = (qty, cost) => cost ? qty / cost : 0;
 
 const METRICS = ['Sum of Qty', 'Sum of PKg Cost', 'Qty / PKg Cost'];
 
-function buildTrend(long, months, groups) {
-  const at = new Map(long.map(c => [c.group + '||' + c.month, c]));
-  const header = ['Item Group'];
+/* One pivot builder for both tabs. `idxFields` names the row dimensions, so
+   ['group'] gives the original Item Group trend and ['targetWh','group'] gives
+   the warehouse-wise one. Cells are summed across whatever dimension is not in
+   the index, which is why adding the warehouse grain moved no existing total. */
+function buildPivot(long, months, idxFields, idxLabels) {
+  const agg = new Map();                 // index tuple + month -> running cell
+  const tuples = new Map();
+  long.forEach(c => {
+    const tuple = idxFields.map(f => c[f]);
+    const ik = tuple.join('||');
+    if (!tuples.has(ik)) tuples.set(ik, tuple);
+    const k = ik + '||' + c.month;
+    let o = agg.get(k);
+    if (!o) agg.set(k, o = { qty: 0, cost: 0 });
+    o.qty += c.qty; o.cost += c.cost;
+  });
+
+  const header = idxLabels.slice();
   months.forEach(m => METRICS.forEach(k => header.push(`${m} (${k})`)));
   METRICS.forEach(k => header.push(`Total (${k})`));
 
-  const body = groups.map(g => {
-    const row = [g];
+  const nIdx = idxFields.length;
+  const rowsOut = [...tuples.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const body = rowsOut.map(([ik, tuple]) => {
+    const row = tuple.slice();
     let tq = 0, tc = 0;
     months.forEach(m => {
-      const c = at.get(g + '||' + m);
-      const q = c ? c.qty : 0, k = c ? c.cost : 0;
-      tq += q; tc += k;
-      row.push(q, k, ratio(q, k));
+      const o = agg.get(ik + '||' + m) || { qty: 0, cost: 0 };
+      tq += o.qty; tc += o.cost;
+      row.push(o.qty, o.cost, ratio(o.qty, o.cost));
     });
     row.push(tq, tc, ratio(tq, tc));
     return row;
   });
 
   // Grand Total: the ratio is re-derived from the summed columns
-  const grand = ['Grand Total'];
-  for (let c = 1; c < header.length; c++) {
-    grand.push(header[c].endsWith(`(${METRICS[2]})`) ? 0 : body.reduce((s, r) => s + r[c], 0));
-  }
-  for (let c = 1; c < header.length; c += 3) grand[c + 2] = ratio(grand[c], grand[c + 1]);
+  const grand = ['Grand Total'].concat(new Array(nIdx - 1).fill(''));
+  for (let c = nIdx; c < header.length; c++) grand.push(body.reduce((sum, r) => sum + r[c], 0));
+  for (let c = nIdx; c < header.length; c += 3) grand[c + 2] = ratio(grand[c], grand[c + 1]);
   body.push(grand);
 
-  return { header, body };
+  return { header, body, nIdx };
 }
 
 /* -------------------------------------------------------------------- load */
@@ -273,9 +292,13 @@ function run(buffer, opts) {
   const months = MONTHS.filter(m => long.some(c => c.month === m))
     .concat(long.some(c => c.month === UNKNOWN) ? [UNKNOWN] : []);
   const groups = [...new Set(long.map(c => c.group))].sort((a, b) => a.localeCompare(b));
+  const warehouses = [...new Set(long.map(c => c.targetWh))].sort((a, b) => a.localeCompare(b));
 
   post('Building month-wise trend', 74);
-  const trend = buildTrend(long, months, groups);
+  const trend = buildPivot(long, months, ['group'], ['Item Group']);
+  // the added tab: same three metrics, one row per warehouse and item group
+  const whTrend = buildPivot(long, months, ['targetWh', 'group'],
+    ['Target Warehouse', 'Item Group']);
 
   const monthTotals = months.map(m => {
     const cs = long.filter(c => c.month === m);
@@ -310,7 +333,9 @@ function run(buffer, opts) {
   post('Done', 95);
   return {
     sheetName: picked.name, sheets, rowCount: rows.length, columns, hasTotalCost,
-    months, groups, long, trend, monthTotals, groupTotals, audit, checks
+    hasWh: columns.includes('Target Warehouse'),
+    months, groups, warehouses, long, trend, whTrend,
+    monthTotals, groupTotals, audit, checks
   };
 }
 
@@ -355,11 +380,14 @@ function buildWorkbook(res, opts) {
     // Measured against this build of SheetJS: sheet XML runs ~52 bytes a cell
     // and the writer dies past roughly 90 MB for the workbook as a whole.
     const BUDGET = 58e6;
+    // Target Warehouse joins CORE because the Warehouse Trend tab's SUMIFS
+    // criteria point at it - without the column those cells cannot be written.
     const CORE = ['Item Group', 'Item Type', 'Qty', 'PKG']
       .concat(res.hasTotalCost ? ['Total Cost'] : ['Value In FG', 'Additional Cost'])
-      .concat(cols.includes('Date') ? ['Date'] : []);
+      .concat(cols.includes('Date') ? ['Date'] : [])
+      .concat(cols.includes('Target Warehouse') ? ['Target Warehouse'] : []);
     const PRIORITY = CORE.concat(['Item Name', 'Workorder', 'Item Code',
-      'Total Amount', 'Amount', 'Basic Rate', 'Target Warehouse', 'Source Warehouse']);
+      'Total Amount', 'Amount', 'Basic Rate', 'Source Warehouse']);
 
     const sample = lastRows.slice(0, 500);
     const costOf = c => {
@@ -431,7 +459,8 @@ function buildWorkbook(res, opts) {
     const rr = c => `'${RAW}'!$${c}$2:$${c}$${lastR}`;
     rawRefs = {
       month: rr(COL(1)), group: rr(L('Item Group')), type: rr(L('Item Type')),
-      qty: rr(L('Qty')), pkgCost: rr(COL(iPkgCost))
+      qty: rr(L('Qty')), pkgCost: rr(COL(iPkgCost)),
+      wh: at('Target Warehouse') >= 0 ? rr(L('Target Warehouse')) : null
     };
   } catch (e) {
     // Drop the sheet rather than ship a truncated one that formulas point at:
@@ -445,39 +474,51 @@ function buildWorkbook(res, opts) {
   }
 
   /* ------------------------------------------------------------ Monthly Trend
-     Every Qty and PKg Cost cell is a SUMIFS over Raw Data carrying all three
-     conditions: the item group, the month, and Item Type = "FG". */
-  const wsT = addAoa('Monthly Trend', res.trend.header, res.trend.body, true);
-  {
-    const nm = res.months.length, last = res.trend.body.length;   // incl. Grand Total
-    for (let i = 0; i < res.trend.body.length; i++) {
+     Every Qty and PKg Cost cell is a SUMIFS over Raw Data carrying the same
+     conditions the dashboard applies: the row's own dimensions, the month, and
+     Item Type = "FG". The warehouse tab reuses this writer with one extra
+     criterion, so both tabs are driven by identical arithmetic. */
+  const writePivot = (name, pivot) => {
+    const ws = addAoa(name, pivot.header, pivot.body, true);
+    const nIdx = pivot.nIdx, nm = res.months.length, last = pivot.body.length;
+    for (let i = 0; i < pivot.body.length; i++) {
       const r = i + 1, row = r + 1;
-      const isGrand = res.trend.body[i][0] === 'Grand Total';
-      for (let k = 0; k <= nm; k++) {                             // months, then Total
-        const c = 1 + k * 3;                                      // Qty column index
+      const isGrand = pivot.body[i][0] === 'Grand Total';
+      for (let k = 0; k <= nm; k++) {                     // months, then Total
+        const c = nIdx + k * 3;                           // Qty column index
         const qL = COL(c), cL = COL(c + 1);
         if (isGrand) {
-          setFormula(wsT, r, c, `SUM(${qL}2:${qL}${last})`, res.trend.body[i][c], '#,##0.00');
-          setFormula(wsT, r, c + 1, `SUM(${cL}2:${cL}${last})`, res.trend.body[i][c + 1], '#,##0.0000');
-        } else if (k < nm && rawRefs) {
-          const crit = `${rawRefs.group},$A${row},${rawRefs.month},"${res.months[k]}",${rawRefs.type},"FG"`;
-          setFormula(wsT, r, c, `SUMIFS(${rawRefs.qty},${crit})`, res.trend.body[i][c], '#,##0.00');
-          setFormula(wsT, r, c + 1, `SUMIFS(${rawRefs.pkgCost},${crit})`, res.trend.body[i][c + 1], '#,##0.0000');
+          setFormula(ws, r, c, `SUM(${qL}2:${qL}${last})`, pivot.body[i][c], '#,##0.00');
+          setFormula(ws, r, c + 1, `SUM(${cL}2:${cL}${last})`, pivot.body[i][c + 1], '#,##0.0000');
+        } else if (k < nm && rawRefs && pivot.crit.length === nIdx) {
+          const dims = pivot.crit.map((ref, d) => `${ref},$${COL(d)}${row}`).join(',');
+          const crit = `${dims},${rawRefs.month},"${res.months[k]}",${rawRefs.type},"FG"`;
+          setFormula(ws, r, c, `SUMIFS(${rawRefs.qty},${crit})`, pivot.body[i][c], '#,##0.00');
+          setFormula(ws, r, c + 1, `SUMIFS(${rawRefs.pkgCost},${crit})`, pivot.body[i][c + 1], '#,##0.0000');
         } else if (k === nm) {
           // the Total block sums the month cells beside it
-          const first = COL(1), lastQ = COL(1 + (nm - 1) * 3);
-          const parts = res.months.map((_, j) => `${COL(1 + j * 3)}${row}`).join(',');
-          const partsC = res.months.map((_, j) => `${COL(2 + j * 3)}${row}`).join(',');
-          setFormula(wsT, r, c, `SUM(${parts})`, res.trend.body[i][c], '#,##0.00');
-          setFormula(wsT, r, c + 1, `SUM(${partsC})`, res.trend.body[i][c + 1], '#,##0.0000');
+          const parts = res.months.map((_, j) => `${COL(nIdx + j * 3)}${row}`).join(',');
+          const partsC = res.months.map((_, j) => `${COL(nIdx + 1 + j * 3)}${row}`).join(',');
+          setFormula(ws, r, c, `SUM(${parts})`, pivot.body[i][c], '#,##0.00');
+          setFormula(ws, r, c + 1, `SUM(${partsC})`, pivot.body[i][c + 1], '#,##0.0000');
         } else {
-          setFmt(wsT, r, c, '#,##0.00'); setFmt(wsT, r, c + 1, '#,##0.0000');
+          setFmt(ws, r, c, '#,##0.00'); setFmt(ws, r, c + 1, '#,##0.0000');
         }
         // CONDITION 3, and it is re-derived on the Total and Grand Total too
-        setFormula(wsT, r, c + 2, `IF(${cL}${row}=0,0,${qL}${row}/${cL}${row})`,
-          res.trend.body[i][c + 2], '#,##0.0000');
+        setFormula(ws, r, c + 2, `IF(${cL}${row}=0,0,${qL}${row}/${cL}${row})`,
+          pivot.body[i][c + 2], '#,##0.0000');
       }
     }
+    return ws;
+  };
+
+  res.trend.crit = rawRefs ? [rawRefs.group] : [];
+  writePivot('Monthly Trend', res.trend);
+
+  // the added tab: identical metrics, split by Target Warehouse
+  if (res.whTrend && res.whTrend.body.length > 1) {
+    res.whTrend.crit = (rawRefs && rawRefs.wh) ? [rawRefs.wh, rawRefs.group] : [];
+    writePivot('Warehouse Trend', res.whTrend);
   }
 
   /* -------------------------------------------------------------- Month Totals
@@ -552,6 +593,9 @@ function buildWorkbook(res, opts) {
     ['FG rows analysed', a.fgRows, 'Everything below is computed from these rows only'],
     ['Non-FG rows excluded', res.rowCount - a.fgRows, ''],
     ['Item groups', res.groups.length, ''],
+    ['Target warehouses', (res.warehouses || []).length,
+      res.hasWh ? 'Warehouse Trend splits the same metrics by these'
+                : 'No Target Warehouse column in the source'],
     ['Months present', res.months.join(', '), 'Calendar order'],
     ['Raw Data tab', rawOmitted ? 'omitted - source too large to embed'
       : `all ${res.rowCount.toLocaleString('en-IN')} rows`,

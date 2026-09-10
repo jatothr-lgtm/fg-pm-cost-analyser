@@ -8,7 +8,7 @@
 'use strict';
 
 // bumped whenever worker.js changes, so browsers never run a cached worker
-const BUILD = '11';
+const BUILD = '12';
 self.__BUILD = BUILD;
 
 const $ = s => document.querySelector(s);
@@ -36,7 +36,7 @@ const ratio = (q, c) => c ? q / c : 0;
 
 /* ------------------------------------------------------------------ state */
 let worker = null, buffer = null, fileName = '', result = null;
-const filters = { month: '', group: '' };
+const filters = { month: '', group: '', wh: '' };
 let sheet = '';                    // '' means let the worker choose
 let tab = 'trend', page = 0, query = '';
 const PAGE = 200;
@@ -116,9 +116,9 @@ $('#fSheet').addEventListener('change', e => {
   filters.month = ''; filters.group = ''; page = 0;
   process();                        // a different sheet is a different dataset
 });
-['fMonth', 'fGroup'].forEach(id => {
+['fMonth', 'fGroup', 'fWh'].forEach(id => {
   $('#' + id).addEventListener('change', e => {
-    filters[{ fMonth: 'month', fGroup: 'group' }[id]] = e.target.value;
+    filters[{ fMonth: 'month', fGroup: 'group', fWh: 'wh' }[id]] = e.target.value;
     page = 0; render(false);
   });
 });
@@ -134,7 +134,8 @@ $('#next').addEventListener('click', () => { page++; drawTable(); });
 /* ------------------------------------------------------------------ derive */
 const filtered = () => result.long.filter(r =>
   (!filters.month || r.month === filters.month) &&
-  (!filters.group || r.group === filters.group));
+  (!filters.group || r.group === filters.group) &&
+  (!filters.wh || r.targetWh === filters.wh));
 
 const monthsIn = rows => result.months.filter(m => rows.some(r => r.month === m));
 const groupsIn = rows => [...new Set(rows.map(r => r.group))].sort((a, b) => a.localeCompare(b));
@@ -150,6 +151,16 @@ function byGroup(rows) {
   rows.forEach(r => {
     let c = m.get(r.group);
     if (!c) m.set(r.group, c = { group: r.group, qty: 0, cost: 0 });
+    c.qty += r.qty; c.cost += r.cost;
+  });
+  const out = [...m.values()]; out.forEach(c => c.ratio = ratio(c.qty, c.cost));
+  return out.sort((a, b) => b.cost - a.cost);
+}
+function byWarehouse(rows) {
+  const m = new Map();
+  rows.forEach(r => {
+    let c = m.get(r.targetWh);
+    if (!c) m.set(r.targetWh, c = { targetWh: r.targetWh, qty: 0, cost: 0 });
     c.qty += r.qty; c.cost += r.cost;
   });
   const out = [...m.values()]; out.forEach(c => c.ratio = ratio(c.qty, c.cost));
@@ -179,6 +190,7 @@ function fillFilters() {
   };
   set('fMonth', result.months, 'month');
   set('fGroup', result.groups, 'group');
+  set('fWh', result.warehouses || [], 'wh');
 
   // the workbook may hold several plausible tabs, so name the one in use
   const sel = $('#fSheet');
@@ -213,7 +225,9 @@ function drawStatus() {
     `sheet <b>${result.sheetName}</b> &middot; ` +
     `${fmt(result.rowCount)} rows read &middot; <b>${fmt(a.fgRows)}</b> FG rows analysed &middot; ` +
     `${fmt(result.rowCount - a.fgRows)} non-FG rows excluded &middot; ` +
-    `${result.groups.length} item groups &middot; ${result.months.join(', ')}` +
+    `${result.groups.length} item groups &middot; ` +
+    `${(result.warehouses || []).length} target warehouse${(result.warehouses || []).length === 1 ? '' : 's'} &middot; ` +
+    `${result.months.join(', ')}` +
     (a.unknownMonthRows ? ` &middot; <b>${fmt(a.unknownMonthRows)}</b> rows with no readable month` : '') +
     `</div></div>`;
   host.appendChild(bar);
@@ -275,40 +289,65 @@ const axisTxt = (x, y, s, anchor = 'middle') => {
 function drawCharts() {
   if (!result) return;
   const rows = filtered();
-  chartCostByMonth(byMonth(rows));
+  const m = byMonth(rows);
+  // one chart per metric - two measures on one plot would need two y-scales
+  chartMonth('#cQty', m, 'qty', 2);
+  chartMonth('#cCost', m, 'cost', 2);
+  chartMonth('#cRatio', m, 'ratio', 4);
   chartRatioTrend(rows);
   chartGroups(byGroup(rows));
 }
 
-/* One series, so one colour and no legend - the card title names it. */
-function chartCostByMonth(data) {
-  const svg = $('#cCost'), W = svg.clientWidth || 520, H = 260;
-  const M = { t: 18, r: 14, b: 30, l: 62 };
+/* One metric per chart, one series, so one colour and no legend - the card
+   title names it. A ratio reads as a line; the two magnitudes as columns. */
+const METRIC_LABEL = { qty: 'Sum of Qty', cost: 'Sum of PKg Cost', ratio: 'Qty / PKg Cost' };
+
+function chartMonth(sel, data, key, dp) {
+  const svg = $(sel), W = svg.clientWidth || 420, H = 232;
+  const M = { t: 16, r: 16, b: 30, l: 58 };
   clear(svg); svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
   if (!data.length) return;
 
-  const ticks = niceTicks(Math.max(...data.map(d => d.cost), 1));
+  const asLine = key === 'ratio';
+  const ticks = niceTicks(Math.max(...data.map(d => d[key]), key === 'ratio' ? 1 : 1));
   const top = ticks[ticks.length - 1] || 1;
   const pw = W - M.l - M.r, ph = H - M.t - M.b;
   const y = v => M.t + ph - (v / top) * ph;
   const band = pw / data.length;
-  const bw = Math.min(24, band - 12);
+  const cx = i => M.l + band * i + band / 2;
 
   ticks.forEach(t => {
     svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: y(t), y2: y(t), stroke: css('--grid'), 'stroke-width': 1 }));
-    svg.appendChild(axisTxt(M.l - 9, y(t) + 4, compact(t), 'end'));
+    svg.appendChild(axisTxt(M.l - 9, y(t) + 4, key === 'ratio' ? fmt(t, t < 10 ? 1 : 0) : compact(t), 'end'));
   });
 
-  data.forEach((d, i) => {
-    const cx = M.l + band * i + band / 2, h = Math.max(0, y(0) - y(d.cost));
-    if (h > 0) svg.appendChild(svgEl('path', {
-      d: colPath(cx - bw / 2, y(d.cost), bw, h, 4), fill: css('--series-1')
+  if (asLine) {
+    svg.appendChild(svgEl('path', {
+      d: 'M' + data.map((d, i) => `${cx(i)},${y(d[key])}`).join('L'),
+      fill: 'none', stroke: css('--series-1'), 'stroke-width': 2,
+      'stroke-linejoin': 'round', 'stroke-linecap': 'round'
     }));
-    svg.appendChild(axisTxt(cx, H - 10, d.month));
-    const hit = svgEl('rect', { x: cx - band / 2, y: M.t, width: band, height: ph, fill: 'transparent' });
+    data.forEach((d, i) => svg.appendChild(svgEl('circle', {
+      cx: cx(i), cy: y(d[key]), r: 4, fill: css('--series-1'),
+      stroke: css('--surface-1'), 'stroke-width': 2
+    })));
+  } else {
+    const bw = Math.min(24, band - 10);
+    data.forEach((d, i) => {
+      const h = Math.max(0, y(0) - y(d[key]));
+      if (h > 0) svg.appendChild(svgEl('path', {
+        d: colPath(cx(i) - bw / 2, y(d[key]), bw, h, 4), fill: css('--series-1')
+      }));
+    });
+  }
+
+  data.forEach((d, i) => {
+    svg.appendChild(axisTxt(cx(i), H - 10, d.month));
+    const hit = svgEl('rect', { x: cx(i) - band / 2, y: M.t, width: band, height: ph, fill: 'transparent' });
     hit.addEventListener('mousemove', e => showTip(e, d.month, [
-      ['Sum of PKg Cost', fmt(d.cost, 2)],
+      [METRIC_LABEL[key], fmt(d[key], dp)],
       ['Sum of Qty', fmt(d.qty, 2)],
+      ['Sum of PKg Cost', fmt(d.cost, 2)],
       ['Qty / PKg Cost', fmt(d.ratio, 4)]
     ]));
     hit.addEventListener('mouseleave', hideTip);
@@ -485,6 +524,39 @@ function tableData() {
     return { header, body, textCols: 1, totalLast: true, dec: c => (c % 3 === 1 ? 2 : 4) };
   }
 
+  if (tab === 'wh') {
+    // same three metrics, with Target Warehouse added as the leading column
+    const months = monthsIn(rows);
+    const agg = new Map(), keys = new Map();
+    rows.forEach(r => {
+      const ik = r.targetWh + '||' + r.group;
+      if (!keys.has(ik)) keys.set(ik, [r.targetWh, r.group]);
+      const k = ik + '||' + r.month;
+      let o = agg.get(k);
+      if (!o) agg.set(k, o = { qty: 0, cost: 0 });
+      o.qty += r.qty; o.cost += r.cost;
+    });
+    const header = ['Target Warehouse', 'Item Group'];
+    months.forEach(m => METRICS.forEach(k => header.push(`${m} (${k})`)));
+    METRICS.forEach(k => header.push(`Total (${k})`));
+
+    const body = [...keys.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([ik, t]) => {
+      const line = t.slice(); let tq = 0, tc = 0;
+      months.forEach(m => {
+        const o = agg.get(ik + '||' + m) || { qty: 0, cost: 0 };
+        tq += o.qty; tc += o.cost;
+        line.push(o.qty, o.cost, ratio(o.qty, o.cost));
+      });
+      line.push(tq, tc, ratio(tq, tc));
+      return line;
+    });
+    const grand = ['Grand Total', ''];
+    for (let c = 2; c < header.length; c++) grand.push(body.reduce((sum, r) => sum + r[c], 0));
+    for (let c = 2; c < header.length; c += 3) grand[c + 2] = ratio(grand[c], grand[c + 1]);
+    body.push(grand);
+    return { header, body, textCols: 2, totalLast: true, dec: c => (c % 3 === 2 ? 2 : 4) };
+  }
+
   if (tab === 'months') {
     const header = ['Month', 'Month No.', ...METRICS];
     const body = byMonth(rows).map(m => [m.month, result.months.indexOf(m.month) + 1, m.qty, m.cost, m.ratio]);
@@ -564,6 +636,7 @@ ${checks.map(c => `<tr>
 <tr><td class="what">Sum of PKg Cost</td><td class="fig">${fmt(t.cost, 2)}</td></tr>
 <tr><td class="what">Qty / PKg Cost</td><td class="fig">${fmt(t.ratio, 4)}</td></tr>
 <tr><td class="what">Sheet analysed</td><td class="fig">${result.sheetName}</td></tr>
+<tr><td class="what">Target warehouses</td><td class="fig">${(result.warehouses || []).length}</td></tr>
 </tbody></table></div>
 </div>
 
@@ -571,8 +644,10 @@ ${checks.map(c => `<tr>
 <p><b>Raw Data</b> is the first tab &mdash; your source rows, with <code>Date 1</code>,
 <code>Month</code> and <code>PKg Cost</code> added as formulas. <b>Monthly Trend</b> holds one row
 per item group and three columns per month, every cell a <code>SUMIFS</code> back into Raw Data
-carrying all three conditions. <b>Month Totals</b> and <b>Item Group Summary</b> read the same data
-the other two ways, and <b>Logic &amp; Audit</b> restates these rules beside the control totals.
+carrying all three conditions. <b>Warehouse Trend</b> is the same pivot with <code>Target
+Warehouse</code> added as the leading column. <b>Month Totals</b> and <b>Item Group Summary</b> read
+the same data the other two ways, and <b>Logic &amp; Audit</b> restates these rules beside the
+control totals.
 Filters on this page do not narrow the export &mdash; it always covers the whole file.</p>
 </div>`;
 }

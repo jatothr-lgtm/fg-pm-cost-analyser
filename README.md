@@ -64,9 +64,28 @@ The chosen sheet is named in the status bar and can be overridden from the
 
 ---
 
+## On the page
+
+Filters for **Month**, **Item group** and **Target warehouse** narrow every tile,
+chart and table at once.
+
+Monthly trends are drawn as one chart per metric — two measures on one plot would
+need two y-scales, which invents a correlation that is not in the data:
+
+| Chart | Metric |
+|---|---|
+| FG Qty by month | `Sum of Qty` |
+| PM Cost by month | `Sum of PKg Cost` |
+| PM Cost per kg by month | `Qty / PKg Cost` |
+
+Below them, `Qty / PKg Cost` for the top five item groups, and total packaging
+cost by item group.
+
+---
+
 ## The export
 
-Five sheets. `Raw Data` is first, and every computed cell downstream of it is a
+Six sheets. `Raw Data` is first, and every computed cell downstream of it is a
 `SUMIFS` back into it — so the whole calculation can be audited in Excel without
 trusting this app.
 
@@ -74,6 +93,7 @@ trusting this app.
 |---|---|
 | **Raw Data** | Your source rows, laid out `Date 1`, `Month`, source columns…, `PKg Cost`. All three derived columns are formulas: `=INT($C2)`, a `CHOOSE(MONTH(...))` month name, and `=$Q2*$U2/100`. |
 | **Monthly Trend** | One row per item group, three columns per month, plus a Total block. Every cell is a `SUMIFS` carrying all three conditions. |
+| **Warehouse Trend** | The same pivot with `Target Warehouse` added as the leading column, so the trend can be read one warehouse at a time. Its `SUMIFS` carry the warehouse as a fourth criterion. |
 | **Month Totals** | The same data by month. |
 | **Item Group Summary** | The same data by item group, with share of cost. |
 | **Logic & Audit** | The conditions restated beside the control totals and checks. |

@@ -8,7 +8,7 @@
 'use strict';
 
 // bumped whenever worker.js changes, so browsers never run a cached worker
-const BUILD = '15';
+const BUILD = '16';
 self.__BUILD = BUILD;
 
 const $ = s => document.querySelector(s);
@@ -639,28 +639,27 @@ function tableData() {
       if (!keys.has(ik)) keys.set(ik, [r.targetWh, r.group]);
       const k = ik + '||' + r.month;
       let o = agg.get(k);
-      if (!o) agg.set(k, o = { qty: 0, cost: 0 });
-      o.qty += r.qty; o.cost += r.cost;
+      if (!o) agg.set(k, o = { qty: 0 });
+      o.qty += r.qty;
     });
     const header = ['Target Warehouse', 'Item Group'];
-    months.forEach(m => METRICS.forEach(k => header.push(`${m} (${k})`)));
-    METRICS.forEach(k => header.push(`Total (${k})`));
+    months.forEach(m => header.push(`${m} (Sum of Qty)`));
+    header.push('Total (Sum of Qty)');
 
     const body = [...keys.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([ik, t]) => {
-      const line = t.slice(); let tq = 0, tc = 0;
+      const line = t.slice(); let tq = 0;
       months.forEach(m => {
-        const o = agg.get(ik + '||' + m) || { qty: 0, cost: 0 };
-        tq += o.qty; tc += o.cost;
-        line.push(o.qty, o.cost, ratio(o.qty, o.cost));
+        const o = agg.get(ik + '||' + m) || { qty: 0 };
+        tq += o.qty;
+        line.push(o.qty);
       });
-      line.push(tq, tc, ratio(tq, tc));
+      line.push(tq);
       return line;
     });
     const grand = ['Grand Total', ''];
     for (let c = 2; c < header.length; c++) grand.push(body.reduce((sum, r) => sum + r[c], 0));
-    for (let c = 2; c < header.length; c += 3) grand[c + 2] = ratio(grand[c], grand[c + 1]);
     body.push(grand);
-    return { header, body, textCols: 2, totalLast: true, dec: c => (c % 3 === 2 ? 2 : 4) };
+    return { header, body, textCols: 2, totalLast: true, dec: c => 2 };
   }
 
   return { header: [], body: [], textCols: 0 };

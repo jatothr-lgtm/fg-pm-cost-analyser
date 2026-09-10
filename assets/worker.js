@@ -217,6 +217,42 @@ function buildPivot(long, months, idxFields, idxLabels) {
   return { header, body, nIdx };
 }
 
+/* Dedicated pivot for BiProduct: only Sum of Qty */
+function buildQtyPivot(long, months, idxFields, idxLabels) {
+  const agg = new Map();
+  const tuples = new Map();
+  long.forEach(c => {
+    const tuple = idxFields.map(f => c[f]);
+    const ik = tuple.join('||');
+    if (!tuples.has(ik)) tuples.set(ik, tuple);
+    const k = ik + '||' + c.month;
+    let o = agg.get(k);
+    if (!o) agg.set(k, o = { qty: 0 });
+    o.qty += c.qty;
+  });
+
+  const header = idxLabels.concat(months.map(m => `${m} (Sum of Qty)`), ['Total (Sum of Qty)']);
+  const nIdx = idxFields.length;
+  const rowsOut = [...tuples.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const body = rowsOut.map(([ik, tuple]) => {
+    const row = tuple.slice();
+    let tq = 0;
+    months.forEach(m => {
+      const o = agg.get(ik + '||' + m) || { qty: 0 };
+      tq += o.qty;
+      row.push(o.qty);
+    });
+    row.push(tq);
+    return row;
+  });
+
+  const grand = ['Grand Total'].concat(new Array(nIdx - 1).fill(''));
+  for (let c = nIdx; c < header.length; c++) grand.push(body.reduce((sum, r) => sum + r[c], 0));
+  body.push(grand);
+
+  return { header, body, nIdx };
+}
+
 /* -------------------------------------------------------------------- load */
 /* Score every sheet so the right one is chosen even in a workbook full of
    working tabs. Total Cost is weighted heavily on purpose: it is the column
@@ -308,7 +344,7 @@ function run(buffer, opts) {
   // the added tab: same three metrics, one row per warehouse and item group
   const whTrend = buildPivot(long, months, ['targetWh', 'group'],
     ['Target Warehouse', 'Item Group']);
-  const biWhTrend = buildPivot(biLong, months, ['targetWh', 'group'],
+  const biWhTrend = buildQtyPivot(biLong, months, ['targetWh', 'group'],
     ['Target Warehouse', 'Item Group']);
 
   const monthTotals = months.map(m => {
@@ -534,11 +570,37 @@ function buildWorkbook(res, opts) {
     writePivot('Warehouse Trend', res.whTrend, 'FG');
   }
 
-  // BiProduct tab: same grouping for BiProduct items
+  const writeQtyPivot = (name, pivot, itemTypeFilter) => {
+    const ws = addAoa(name, pivot.header, pivot.body, true);
+    const nIdx = pivot.nIdx, nm = res.months.length, last = pivot.body.length;
+    for (let i = 0; i < pivot.body.length; i++) {
+      const r = i + 1, row = r + 1;
+      const isGrand = pivot.body[i][0] === 'Grand Total';
+      for (let k = 0; k <= nm; k++) {                     // months, then Total
+        const c = nIdx + k;                               // Qty column index
+        const qL = COL(c);
+        if (isGrand) {
+          setFormula(ws, r, c, `SUM(${qL}2:${qL}${last})`, pivot.body[i][c], '#,##0.00');
+        } else if (k < nm && rawRefs && pivot.crit.length === nIdx) {
+          const dims = pivot.crit.map((ref, d) => `${ref},$${COL(d)}${row}`).join(',');
+          const crit = `${dims},${rawRefs.month},"${res.months[k]}",${rawRefs.type},"${itemTypeFilter}"`;
+          setFormula(ws, r, c, `SUMIFS(${rawRefs.qty},${crit})`, pivot.body[i][c], '#,##0.00');
+        } else if (k === nm) {
+          const parts = res.months.map((_, j) => `${COL(nIdx + j)}${row}`).join(',');
+          setFormula(ws, r, c, `SUM(${parts})`, pivot.body[i][c], '#,##0.00');
+        } else {
+          setFmt(ws, r, c, '#,##0.00');
+        }
+      }
+    }
+    return ws;
+  };
+
+  // BiProduct tab: same grouping for BiProduct items (only Qty)
   if (res.biWhTrend && res.biWhTrend.body.length > 1) {
     res.biWhTrend.crit = (rawRefs && rawRefs.wh) ? [rawRefs.wh, rawRefs.group] : [];
     const biTypeName = Object.keys(res.audit.typeCounts).find(t => t.toUpperCase().replace(/[\s_-]/g, '') === 'BIPRODUCT') || 'BiProduct';
-    writePivot('BiProduct Trend', res.biWhTrend, biTypeName);
+    writeQtyPivot('BiProduct Trend', res.biWhTrend, biTypeName);
   }
 
   /* -------------------------------------------------------------- Month Totals

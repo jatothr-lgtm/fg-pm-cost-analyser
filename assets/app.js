@@ -8,7 +8,7 @@
 'use strict';
 
 // bumped whenever worker.js changes, so browsers never run a cached worker
-const BUILD = '12';
+const BUILD = '13';
 self.__BUILD = BUILD;
 
 const $ = s => document.querySelector(s);
@@ -32,12 +32,23 @@ const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).
 const SERIES = () => [1, 2, 3, 4, 5].map(i => css('--series-' + i));
 
 const METRICS = ['Sum of Qty', 'Sum of PKg Cost', 'Qty / PKg Cost'];
+
+/* What each metric is called on screen, versus the column name it keeps in the
+   export. FG Qty is finished goods, PM Cost is the packing material, and the
+   ratio is packaging cost per kg. */
+const METRIC = {
+  qty:   { key: 'qty',   name: 'FG Qty',         col: 'Sum of Qty',      dp: 2, card: '#cardQty' },
+  cost:  { key: 'cost',  name: 'PM Cost',        col: 'Sum of PKg Cost', dp: 2, card: '#cardCost' },
+  ratio: { key: 'ratio', name: 'PM Cost per kg', col: 'Qty / PKg Cost',  dp: 4, card: '#cardRatio' }
+};
+const METRIC_ORDER = ['qty', 'cost', 'ratio'];
 const ratio = (q, c) => c ? q / c : 0;
 
 /* ------------------------------------------------------------------ state */
 let worker = null, buffer = null, fileName = '', result = null;
 const filters = { month: '', group: '', wh: '' };
 let sheet = '';                    // '' means let the worker choose
+const shown = new Set(METRIC_ORDER);   // which metrics are charted
 let tab = 'trend', page = 0, query = '';
 const PAGE = 200;
 
@@ -116,6 +127,17 @@ $('#fSheet').addEventListener('change', e => {
   filters.month = ''; filters.group = ''; page = 0;
   process();                        // a different sheet is a different dataset
 });
+$('#fMetric').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const k = b.dataset.v;
+  // multi-select, but never let the last one off - an empty board says nothing
+  if (shown.has(k)) { if (shown.size > 1) shown.delete(k); }
+  else shown.add(k);
+  [...e.currentTarget.querySelectorAll('button')]
+    .forEach(x => x.setAttribute('aria-pressed', String(shown.has(x.dataset.v))));
+  drawCharts();
+});
+
 ['fMonth', 'fGroup', 'fWh'].forEach(id => {
   $('#' + id).addEventListener('change', e => {
     filters[{ fMonth: 'month', fGroup: 'group', fWh: 'wh' }[id]] = e.target.value;
@@ -238,9 +260,9 @@ function drawTiles() {
   const t = totalsOf(rows);
   const scope = filters.month || filters.group ? 'current filters' : 'all FG rows';
   const tiles = [
-    ['Sum of Qty', fmt(t.qty, 2), `Kg produced &middot; ${scope}`],
-    ['Sum of PKg Cost', fmt(t.cost, 2), 'Total Cost &times; PKG / 100'],
-    ['Qty / PKg Cost', t.cost ? fmt(t.ratio, 4) : '—', 'Re-derived from both totals'],
+    ['FG Qty', fmt(t.qty, 2), `Sum of Qty &middot; ${scope}`],
+    ['PM Cost', fmt(t.cost, 2), 'Sum of PKg Cost &middot; Total Cost &times; PKG / 100'],
+    ['PM Cost per kg', t.cost ? fmt(t.ratio, 4) : '—', 'Qty &divide; PKg Cost, re-derived'],
     ['FG rows', fmt(result.audit.fgRows), `of ${fmt(result.rowCount)} rows read`],
     ['Item groups', fmt(groupsIn(rows).length), `${result.months.length} month${result.months.length === 1 ? '' : 's'} in file`]
   ];
@@ -290,31 +312,42 @@ function drawCharts() {
   if (!result) return;
   const rows = filtered();
   const m = byMonth(rows);
-  // one chart per metric - two measures on one plot would need two y-scales
-  chartMonth('#cQty', m, 'qty', 2);
-  chartMonth('#cCost', m, 'cost', 2);
-  chartMonth('#cRatio', m, 'ratio', 4);
-  chartRatioTrend(rows);
-  chartGroups(byGroup(rows));
+  const on = METRIC_ORDER.filter(k => shown.has(k));
+
+  // One chart per metric. Selecting several shows them side by side rather
+  // than stacking measures on one plot, which would need two y-scales.
+  const grid = $('.charts.three');
+  grid.classList.toggle('one', on.length === 1);
+  grid.classList.toggle('two', on.length === 2);
+  METRIC_ORDER.forEach(k => { $(METRIC[k].card).hidden = !shown.has(k); });
+  on.forEach(k => chartMonth('#c' + k[0].toUpperCase() + k.slice(1), m, k, METRIC[k].dp));
+
+  // the two lower charts follow the first metric selected
+  const lead = METRIC[on[0]];
+  $('#hTrend').textContent = `${lead.name} — top 5 item groups`;
+  $('#hGroups').textContent = `${lead.name} by item group`;
+  $('#sGroups').textContent = `${lead.col} across the selected months`;
+  chartRatioTrend(rows, lead);
+  chartGroups(byGroup(rows), lead);
 }
 
 /* One metric per chart, one series, so one colour and no legend - the card
    title names it. A ratio reads as a line; the two magnitudes as columns. */
-const METRIC_LABEL = { qty: 'Sum of Qty', cost: 'Sum of PKg Cost', ratio: 'Qty / PKg Cost' };
-
 function chartMonth(sel, data, key, dp) {
-  const svg = $(sel), W = svg.clientWidth || 420, H = 232;
-  const M = { t: 16, r: 16, b: 30, l: 58 };
+  const svg = $(sel), W = svg.clientWidth || 420, H = 244;
+  // top margin leaves room for the per-month value sitting above each mark
+  const M = { t: 28, r: 16, b: 30, l: 58 };
   clear(svg); svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
   if (!data.length) return;
 
   const asLine = key === 'ratio';
-  const ticks = niceTicks(Math.max(...data.map(d => d[key]), key === 'ratio' ? 1 : 1));
+  const ticks = niceTicks(Math.max(...data.map(d => d[key]), 1));
   const top = ticks[ticks.length - 1] || 1;
   const pw = W - M.l - M.r, ph = H - M.t - M.b;
   const y = v => M.t + ph - (v / top) * ph;
   const band = pw / data.length;
   const cx = i => M.l + band * i + band / 2;
+  const label = v => key === 'ratio' ? fmt(v, v < 100 ? 2 : 0) : compact(v);
 
   ticks.forEach(t => {
     svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: y(t), y2: y(t), stroke: css('--grid'), 'stroke-width': 1 }));
@@ -341,14 +374,23 @@ function chartMonth(sel, data, key, dp) {
     });
   }
 
+  // the value for every month, above the mark and clamped inside the plot
+  data.forEach((d, i) => {
+    const t = svgEl('text', {
+      x: cx(i), y: Math.max(12, y(d[key]) - (asLine ? 11 : 7)),
+      'text-anchor': 'middle', class: 'val-txt'
+    });
+    t.textContent = label(d[key]);
+    svg.appendChild(t);
+  });
+
   data.forEach((d, i) => {
     svg.appendChild(axisTxt(cx(i), H - 10, d.month));
     const hit = svgEl('rect', { x: cx(i) - band / 2, y: M.t, width: band, height: ph, fill: 'transparent' });
     hit.addEventListener('mousemove', e => showTip(e, d.month, [
-      [METRIC_LABEL[key], fmt(d[key], dp)],
-      ['Sum of Qty', fmt(d.qty, 2)],
-      ['Sum of PKg Cost', fmt(d.cost, 2)],
-      ['Qty / PKg Cost', fmt(d.ratio, 4)]
+      ['FG Qty', fmt(d.qty, 2)],
+      ['PM Cost', fmt(d.cost, 2)],
+      ['PM Cost per kg', fmt(d.ratio, 4)]
     ]));
     hit.addEventListener('mouseleave', hideTip);
     svg.appendChild(hit);
@@ -358,7 +400,7 @@ function chartMonth(sel, data, key, dp) {
 
 /* Up to five groups. A legend is always present; only the top series carries
    a direct end-label, so converging lines never collide. */
-function chartRatioTrend(rows) {
+function chartRatioTrend(rows, metric) {
   const svg = $('#cTrend'), legend = $('#lTrend');
   const W = svg.clientWidth || 520, H = 260;
   const M = { t: 18, r: 74, b: 30, l: 56 };
@@ -366,15 +408,18 @@ function chartRatioTrend(rows) {
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
 
   const months = monthsIn(rows);
-  const top5 = byGroup(rows).slice(0, 5);
+  const rank = metric ? metric.key : 'ratio';
+  const top5 = byGroup(rows).sort((a, b) => b[rank] - a[rank]).slice(0, 5);
   if (!months.length || !top5.length) return;
 
   const at = new Map(rows.map(r => [r.group + '||' + r.month, r]));
+  const mk = metric ? metric.key : 'ratio';
+  const valOf = c => mk === 'qty' ? c.qty : mk === 'cost' ? c.cost : ratio(c.qty, c.cost);
   const series = top5.map((g, i) => ({
     name: g.group, colour: SERIES()[i], total: g.cost,
     pts: months.map((m, x) => {
       const c = at.get(g.group + '||' + m);
-      return { x, month: m, v: c ? ratio(c.qty, c.cost) : null, qty: c ? c.qty : 0, cost: c ? c.cost : 0 };
+      return { x, month: m, v: c ? valOf(c) : null, qty: c ? c.qty : 0, cost: c ? c.cost : 0 };
     })
   }));
 
@@ -387,7 +432,8 @@ function chartRatioTrend(rows) {
 
   ticks.forEach(t => {
     svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: y(t), y2: y(t), stroke: css('--grid'), 'stroke-width': 1 }));
-    svg.appendChild(axisTxt(M.l - 9, y(t) + 4, fmt(t, t < 10 ? 1 : 0), 'end'));
+    svg.appendChild(axisTxt(M.l - 9, y(t) + 4,
+      mk === 'ratio' ? fmt(t, t < 10 ? 1 : 0) : compact(t), 'end'));
   });
   months.forEach((m, i) => svg.appendChild(axisTxt(x(i), H - 10, m)));
 
@@ -438,7 +484,7 @@ function chartRatioTrend(rows) {
     hit.addEventListener('mousemove', e => showTip(e, m,
       series.map(s => {
         const p = s.pts[i];
-        return [s.name, p.v === null ? '—' : fmt(p.v, 4)];
+        return [s.name, p.v === null ? '—' : fmt(p.v, mk === 'ratio' ? 4 : 2)];
       })));
     hit.addEventListener('mouseleave', hideTip);
     svg.appendChild(hit);
@@ -450,7 +496,7 @@ function chartRatioTrend(rows) {
 }
 
 /* One series again: nominal categories all wear slot 1, never a value ramp. */
-function chartGroups(data) {
+function chartGroups(data, metric) {
   const svg = $('#cGroups');
   const rows = data.slice(0, 15);
   const W = svg.clientWidth || 900, rowH = 26, H = Math.max(120, rows.length * rowH + 44);
@@ -458,7 +504,10 @@ function chartGroups(data) {
   clear(svg); svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
   if (!rows.length) return;
 
-  const ticks = niceTicks(Math.max(...rows.map(d => d.cost), 1));
+  const mk = metric ? metric.key : 'cost';
+  const gv = d => d[mk];
+  rows.sort((a, b) => gv(b) - gv(a));
+  const ticks = niceTicks(Math.max(...rows.map(gv), 1));
   const top = ticks[ticks.length - 1] || 1;
   const pw = W - M.l - M.r;
   const x = v => M.l + (v / top) * pw;
@@ -471,7 +520,7 @@ function chartGroups(data) {
 
   rows.forEach((d, i) => {
     const yy = M.t + i * rowH + (rowH - bh) / 2;
-    const w = Math.max(0, x(d.cost) - M.l);
+    const w = Math.max(0, x(gv(d)) - M.l);
     if (w > 0) svg.appendChild(svgEl('path', {
       d: barPath(M.l, yy, w, bh, 4), fill: css('--series-1')
     }));
@@ -479,13 +528,18 @@ function chartGroups(data) {
     lb.textContent = d.group.length > 17 ? d.group.slice(0, 16) + '…' : d.group;
     svg.appendChild(lb);
     // value at the tip, outside the bar so it can never be clipped
-    svg.appendChild(axisTxt(Math.min(x(d.cost) + 8, W - 4), yy + bh / 2 + 4, compact(d.cost), 'start'));
+    const vt = svgEl('text', {
+      x: Math.min(x(gv(d)) + 8, W - 4), y: yy + bh / 2 + 4,
+      'text-anchor': 'start', class: 'val-txt'
+    });
+    vt.textContent = mk === 'ratio' ? fmt(gv(d), 2) : compact(gv(d));
+    svg.appendChild(vt);
 
     const hit = svgEl('rect', { x: M.l, y: M.t + i * rowH, width: pw, height: rowH, fill: 'transparent' });
     hit.addEventListener('mousemove', e => showTip(e, d.group, [
-      ['Sum of PKg Cost', fmt(d.cost, 2)],
-      ['Sum of Qty', fmt(d.qty, 2)],
-      ['Qty / PKg Cost', fmt(d.ratio, 4)]
+      ['FG Qty', fmt(d.qty, 2)],
+      ['PM Cost', fmt(d.cost, 2)],
+      ['PM Cost per kg', fmt(d.ratio, 4)]
     ]));
     hit.addEventListener('mouseleave', hideTip);
     svg.appendChild(hit);

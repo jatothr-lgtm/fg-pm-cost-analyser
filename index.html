@@ -174,7 +174,11 @@ svg.chart{display:block;width:100%;overflow:visible}
 .legend span{display:inline-flex;align-items:center;gap:6px}
 .legend i{width:11px;height:11px;border-radius:3px;display:inline-block}
 .axis-txt{fill:var(--text-muted);font-size:11px}
-.val-txt{fill:var(--text-secondary);font-size:11px;font-weight:500}
+.seg.multi button[aria-pressed=true]{background:var(--accent);color:#fff}
+.charts.one{grid-template-columns:1fr}
+.charts.two{grid-template-columns:1fr 1fr}
+@media (max-width:820px){.charts.two{grid-template-columns:1fr}}
+.val-txt{fill:var(--text-secondary);font-size:10.5px;font-weight:500;font-variant-numeric:tabular-nums}
 
 .tip{
   position:fixed;z-index:90;pointer-events:none;opacity:0;transition:opacity .1s;
@@ -377,6 +381,14 @@ td.num{font-variant-numeric:tabular-nums}
         <select id="fWh"><option value="">All warehouses</option></select>
       </div>
       <div class="field spacer">
+        <label for="fMetric">Compare</label>
+        <div class="seg multi" id="fMetric" role="group" aria-label="Metrics to chart">
+          <button data-v="qty" aria-pressed="true">FG Qty</button>
+          <button data-v="cost" aria-pressed="true">PM Cost</button>
+          <button data-v="ratio" aria-pressed="true">PM Cost per kg</button>
+        </div>
+      </div>
+      <div class="field spacer">
         <label>Conditions</label>
         <div class="condline">
           <code>PKg Cost = Total Cost &times; PKG / 100</code>
@@ -387,17 +399,17 @@ td.num{font-variant-numeric:tabular-nums}
     </div>
 
     <div class="charts three">
-      <div class="card">
+      <div class="card" id="cardQty">
         <h3>FG Qty by month</h3>
         <div class="csub">Sum of Qty, FG rows only</div>
         <figure><svg class="chart" id="cQty" role="img" aria-label="FG Qty by month"></svg></figure>
       </div>
-      <div class="card">
+      <div class="card" id="cardCost">
         <h3>PM Cost by month</h3>
         <div class="csub">Sum of PKg Cost &mdash; Total Cost &times; PKG / 100</div>
         <figure><svg class="chart" id="cCost" role="img" aria-label="PM Cost by month"></svg></figure>
       </div>
-      <div class="card">
+      <div class="card" id="cardRatio">
         <h3>PM Cost per kg by month</h3>
         <div class="csub">Qty &divide; PKg Cost, re-derived from both totals</div>
         <figure><svg class="chart" id="cRatio" role="img" aria-label="PM Cost per kg by month"></svg></figure>
@@ -406,14 +418,14 @@ td.num{font-variant-numeric:tabular-nums}
 
     <div class="charts">
       <div class="card">
-        <h3>Qty &divide; PKg Cost &mdash; top 5 item groups</h3>
+        <h3 id="hTrend">PM Cost per kg &mdash; top 5 item groups</h3>
         <div class="csub">Month by month; the top line is labelled at its end</div>
         <figure><svg class="chart" id="cTrend" role="img" aria-label="Qty per PKg Cost by item group"></svg></figure>
         <div class="legend" id="lTrend"></div>
       </div>
       <div class="card wide">
-        <h3>Packaging cost by item group</h3>
-        <div class="csub">Sum of PKg Cost across the selected months</div>
+        <h3 id="hGroups">PM Cost by item group</h3>
+        <div class="csub" id="sGroups">Across the selected months</div>
         <figure><svg class="chart" id="cGroups" role="img" aria-label="Packaging cost by item group"></svg></figure>
       </div>
     </div>
@@ -448,6 +460,6 @@ td.num{font-variant-numeric:tabular-nums}
 </div>
 <div class="tip" id="tip" role="status"></div>
 
-<script src="assets/app.js?v=12"></script>
+<script src="assets/app.js?v=13"></script>
 </body>
 </html>

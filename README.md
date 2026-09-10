@@ -69,17 +69,28 @@ The chosen sheet is named in the status bar and can be overridden from the
 Filters for **Month**, **Item group** and **Target warehouse** narrow every tile,
 chart and table at once.
 
-Monthly trends are drawn as one chart per metric — two measures on one plot would
-need two y-scales, which invents a correlation that is not in the data:
+The **Compare** toggle picks which metrics are charted — one, two or all three.
+It is multi-select, and the last one cannot be switched off. Each metric keeps
+its own chart rather than sharing a plot: two measures of different scale on one
+axis would need two y-scales, which invents a correlation that is not in the
+data. With one selected the chart goes full width, with two it splits, with
+three it runs three across.
 
-| Chart | Metric |
-|---|---|
-| FG Qty by month | `Sum of Qty` |
-| PM Cost by month | `Sum of PKg Cost` |
-| PM Cost per kg by month | `Qty / PKg Cost` |
+| On screen | Column in the export | Is |
+|---|---|---|
+| **FG Qty** | `Sum of Qty` | finished goods produced |
+| **PM Cost** | `Sum of PKg Cost` | packing material cost |
+| **PM Cost per kg** | `Qty / PKg Cost` | packaging cost per kg |
 
-Below them, `Qty / PKg Cost` for the top five item groups, and total packaging
-cost by item group.
+**Every chart prints its value for every month** — above each column, above each
+line marker, and at each bar end. Magnitudes are shortened (`4.7 L`, `52k`), the
+ratio is shown to two decimals.
+
+The two charts below follow whichever metric is selected first: the top five item
+groups month by month, and the same metric ranked by item group.
+
+The export keeps the `Sum of Qty` / `Sum of PKg Cost` / `Qty / PKg Cost` column
+names, matching the reference pivot's language.
 
 ---
 

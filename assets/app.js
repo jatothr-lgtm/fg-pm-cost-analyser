@@ -8,7 +8,7 @@
 'use strict';
 
 // bumped whenever worker.js changes, so browsers never run a cached worker
-const BUILD = '14';
+const BUILD = '15';
 self.__BUILD = BUILD;
 
 const $ = s => document.querySelector(s);
@@ -625,6 +625,42 @@ function tableData() {
     const body = byGroup(rows).map(g => [g.group, g.qty, g.cost, g.ratio, t.cost ? g.cost / t.cost : 0]);
     body.push(['Grand Total', t.qty, t.cost, t.ratio, t.cost ? 1 : 0]);
     return { header, body, textCols: 1, totalLast: true, dec: c => (c === 1 ? 2 : 4), pct: 4 };
+  }
+
+  if (tab === 'biproduct') {
+    const biLong = (result.biLong || []).filter(r =>
+      (!filters.month || r.month === filters.month) &&
+      (!filters.group || r.group === filters.group) &&
+      (!filters.wh || r.targetWh === filters.wh));
+    const months = result.months.filter(m => biLong.some(r => r.month === m));
+    const agg = new Map(), keys = new Map();
+    biLong.forEach(r => {
+      const ik = r.targetWh + '||' + r.group;
+      if (!keys.has(ik)) keys.set(ik, [r.targetWh, r.group]);
+      const k = ik + '||' + r.month;
+      let o = agg.get(k);
+      if (!o) agg.set(k, o = { qty: 0, cost: 0 });
+      o.qty += r.qty; o.cost += r.cost;
+    });
+    const header = ['Target Warehouse', 'Item Group'];
+    months.forEach(m => METRICS.forEach(k => header.push(`${m} (${k})`)));
+    METRICS.forEach(k => header.push(`Total (${k})`));
+
+    const body = [...keys.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([ik, t]) => {
+      const line = t.slice(); let tq = 0, tc = 0;
+      months.forEach(m => {
+        const o = agg.get(ik + '||' + m) || { qty: 0, cost: 0 };
+        tq += o.qty; tc += o.cost;
+        line.push(o.qty, o.cost, ratio(o.qty, o.cost));
+      });
+      line.push(tq, tc, ratio(tq, tc));
+      return line;
+    });
+    const grand = ['Grand Total', ''];
+    for (let c = 2; c < header.length; c++) grand.push(body.reduce((sum, r) => sum + r[c], 0));
+    for (let c = 2; c < header.length; c += 3) grand[c + 2] = ratio(grand[c], grand[c + 1]);
+    body.push(grand);
+    return { header, body, textCols: 2, totalLast: true, dec: c => (c % 3 === 2 ? 2 : 4) };
   }
 
   return { header: [], body: [], textCols: 0 };

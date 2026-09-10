@@ -94,6 +94,7 @@ trusting this app.
 | **Warehouse Trend** | The same pivot with `Target Warehouse` added as the leading column, so the trend can be read one warehouse at a time. Its `SUMIFS` carry the warehouse as a fourth criterion. |
 | **Month Totals** | The same data by month. |
 | **Item Group Summary** | The same data by item group, with share of cost. |
+| **BiProduct Trend** | Multi-dimensional pivot for `Item Type = BiProduct` grouped by Target Warehouse, Item Group, and Month. |
 | **Logic & Audit** | The conditions restated beside the control totals and checks. |
 
 `Month` is written with `CHOOSE(MONTH(...))` rather than `TEXT(...,"mmm")` so the

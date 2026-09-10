@@ -114,50 +114,55 @@ const pkgCostOf = (row, hasTotalAmount) => totalAmountOf(row, hasTotalAmount) * 
    ------------------------------------------------------------------------- */
 function aggregate(rows, hasTotalAmount) {
   const cells = new Map();                 // "group|month|warehouse" -> cell
+  const biCells = new Map();               // BiProduct: "group|month|warehouse" -> cell
   const audit = {
-    typeCounts: {}, fgRows: 0, unknownMonthRows: 0, blankPkgRows: 0,
+    typeCounts: {}, fgRows: 0, biRows: 0, unknownMonthRows: 0, blankPkgRows: 0,
     negativeCostRows: 0, qtyTotal: 0, costTotal: 0,
     sourcePkgCostTotal: 0, recomputeMaxDiff: 0, hasSourcePkgCost: false
   };
 
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
-    const type = txt(r['Item Type']) || '(blank)';
-    audit.typeCounts[type] = (audit.typeCounts[type] || 0) + 1;
-
-    if (type.toUpperCase() !== FG) continue;          // CONDITION 2
-    audit.fgRows++;
+    const rawType = txt(r['Item Type']) || '(blank)';
+    const type = rawType.toUpperCase().replace(/[\s_-]/g, '');
+    audit.typeCounts[rawType] = (audit.typeCounts[rawType] || 0) + 1;
 
     const month = monthOf(r);
-    if (month === UNKNOWN) audit.unknownMonthRows++;
     const group = txt(r['Item Group']) || UNKNOWN;
     const qty = num(r['Qty']);
     const cost = pkgCostOf(r, hasTotalAmount);
-
-    if (!num(r['PKG'])) audit.blankPkgRows++;
-    if (cost < 0) audit.negativeCostRows++;
-    audit.qtyTotal += qty;
-    audit.costTotal += cost;
-
-    // when the source already carries the column, check our own arithmetic
-    if (r['PKg Cost'] !== undefined && r['PKg Cost'] !== null && r['PKg Cost'] !== '') {
-      audit.hasSourcePkgCost = true;
-      const given = num(r['PKg Cost']);
-      audit.sourcePkgCostTotal += given;
-      const diff = Math.abs(given - cost);
-      if (diff > audit.recomputeMaxDiff) audit.recomputeMaxDiff = diff;
-    }
-
     const wh = txt(r['Target Warehouse']) || UNKNOWN;
-    const key = group + '||' + month + '||' + wh;
-    let c = cells.get(key);
-    if (!c) cells.set(key, c = {
-      group, month, monthNum: MONTH_NUM[month] || 99, targetWh: wh, qty: 0, cost: 0, rows: 0
-    });
-    c.qty += qty; c.cost += cost; c.rows++;
+
+    if (type === FG) {
+      audit.fgRows++;
+      if (month === UNKNOWN) audit.unknownMonthRows++;
+      if (!num(r['PKG'])) audit.blankPkgRows++;
+      if (cost < 0) audit.negativeCostRows++;
+      audit.qtyTotal += qty;
+      audit.costTotal += cost;
+
+      if (r['PKg Cost'] !== undefined && r['PKg Cost'] !== null && r['PKg Cost'] !== '') {
+        audit.hasSourcePkgCost = true;
+        const given = num(r['PKg Cost']);
+        audit.sourcePkgCostTotal += given;
+        const diff = Math.abs(given - cost);
+        if (diff > audit.recomputeMaxDiff) audit.recomputeMaxDiff = diff;
+      }
+
+      const key = group + '||' + month + '||' + wh;
+      let c = cells.get(key);
+      if (!c) cells.set(key, c = { group, month, monthNum: MONTH_NUM[month] || 99, targetWh: wh, qty: 0, cost: 0, rows: 0 });
+      c.qty += qty; c.cost += cost; c.rows++;
+    } else if (type === 'BIPRODUCT') {
+      audit.biRows++;
+      const key = group + '||' + month + '||' + wh;
+      let c = biCells.get(key);
+      if (!c) biCells.set(key, c = { group, month, monthNum: MONTH_NUM[month] || 99, targetWh: wh, qty: 0, cost: 0, rows: 0 });
+      c.qty += qty; c.cost += cost; c.rows++;
+    }
   }
 
-  return { long: [...cells.values()], audit };
+  return { long: [...cells.values()], biLong: [...biCells.values()], audit };
 }
 
 /* -------------------------------------------------------------------------
@@ -290,11 +295,11 @@ function run(buffer, opts) {
   }
 
   post('Applying FG filter and PKg Cost', 52);
-  const { long, audit } = aggregate(rows, hasTotalAmount);
+  const { long, biLong, audit } = aggregate(rows, hasTotalAmount);
   if (!audit.fgRows) throw new Error('No rows with Item Type = FG were found, so there is nothing to analyse.');
 
-  const months = MONTHS.filter(m => long.some(c => c.month === m))
-    .concat(long.some(c => c.month === UNKNOWN) ? [UNKNOWN] : []);
+  const months = MONTHS.filter(m => long.some(c => c.month === m) || biLong.some(c => c.month === m))
+    .concat(long.some(c => c.month === UNKNOWN) || biLong.some(c => c.month === UNKNOWN) ? [UNKNOWN] : []);
   const groups = [...new Set(long.map(c => c.group))].sort((a, b) => a.localeCompare(b));
   const warehouses = [...new Set(long.map(c => c.targetWh))].sort((a, b) => a.localeCompare(b));
 
@@ -302,6 +307,8 @@ function run(buffer, opts) {
   const trend = buildPivot(long, months, ['group'], ['Item Group']);
   // the added tab: same three metrics, one row per warehouse and item group
   const whTrend = buildPivot(long, months, ['targetWh', 'group'],
+    ['Target Warehouse', 'Item Group']);
+  const biWhTrend = buildPivot(biLong, months, ['targetWh', 'group'],
     ['Target Warehouse', 'Item Group']);
 
   const monthTotals = months.map(m => {
@@ -338,7 +345,7 @@ function run(buffer, opts) {
   return {
     sheetName: picked.name, sheets, rowCount: rows.length, columns, hasTotalAmount, hasTotalCost,
     hasWh: columns.includes('Target Warehouse'),
-    months, groups, warehouses, long, trend, whTrend,
+    months, groups, warehouses, long, biLong, trend, whTrend, biWhTrend,
     monthTotals, groupTotals, audit, checks
   };
 }
@@ -484,7 +491,7 @@ function buildWorkbook(res, opts) {
      conditions the dashboard applies: the row's own dimensions, the month, and
      Item Type = "FG". The warehouse tab reuses this writer with one extra
      criterion, so both tabs are driven by identical arithmetic. */
-  const writePivot = (name, pivot) => {
+  const writePivot = (name, pivot, itemTypeFilter = "FG") => {
     const ws = addAoa(name, pivot.header, pivot.body, true);
     const nIdx = pivot.nIdx, nm = res.months.length, last = pivot.body.length;
     for (let i = 0; i < pivot.body.length; i++) {
@@ -498,7 +505,7 @@ function buildWorkbook(res, opts) {
           setFormula(ws, r, c + 1, `SUM(${cL}2:${cL}${last})`, pivot.body[i][c + 1], '#,##0.0000');
         } else if (k < nm && rawRefs && pivot.crit.length === nIdx) {
           const dims = pivot.crit.map((ref, d) => `${ref},$${COL(d)}${row}`).join(',');
-          const crit = `${dims},${rawRefs.month},"${res.months[k]}",${rawRefs.type},"FG"`;
+          const crit = `${dims},${rawRefs.month},"${res.months[k]}",${rawRefs.type},"${itemTypeFilter}"`;
           setFormula(ws, r, c, `SUMIFS(${rawRefs.qty},${crit})`, pivot.body[i][c], '#,##0.00');
           setFormula(ws, r, c + 1, `SUMIFS(${rawRefs.pkgCost},${crit})`, pivot.body[i][c + 1], '#,##0.0000');
         } else if (k === nm) {
@@ -519,12 +526,19 @@ function buildWorkbook(res, opts) {
   };
 
   res.trend.crit = rawRefs ? [rawRefs.group] : [];
-  writePivot('Monthly Trend', res.trend);
+  writePivot('Monthly Trend', res.trend, 'FG');
 
   // the added tab: identical metrics, split by Target Warehouse
   if (res.whTrend && res.whTrend.body.length > 1) {
     res.whTrend.crit = (rawRefs && rawRefs.wh) ? [rawRefs.wh, rawRefs.group] : [];
-    writePivot('Warehouse Trend', res.whTrend);
+    writePivot('Warehouse Trend', res.whTrend, 'FG');
+  }
+
+  // BiProduct tab: same grouping for BiProduct items
+  if (res.biWhTrend && res.biWhTrend.body.length > 1) {
+    res.biWhTrend.crit = (rawRefs && rawRefs.wh) ? [rawRefs.wh, rawRefs.group] : [];
+    const biTypeName = Object.keys(res.audit.typeCounts).find(t => t.toUpperCase().replace(/[\s_-]/g, '') === 'BIPRODUCT') || 'BiProduct';
+    writePivot('BiProduct Trend', res.biWhTrend, biTypeName);
   }
 
   /* -------------------------------------------------------------- Month Totals

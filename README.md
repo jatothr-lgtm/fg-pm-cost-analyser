@@ -63,11 +63,38 @@ axis would need two y-scales, which invents a correlation that is not in the
 data. With one selected the chart goes full width, with two it splits, with
 three it runs three across.
 
+### 6. PM Cost % of Revenue = PKg Cost ÷ monthly revenue × 100
+
+Revenue is a **supplied monthly constant**, not derived from the extract. It
+lives in one place — `REVENUE` at the top of `assets/worker.js`. Add a month
+there when it closes:
+
+| Month | Total Sale (INR) |
+|---|---:|
+| Apr | 410,800,000 |
+| May | 516,800,000 |
+| Jun | 530,000,000 |
+| Jul | 605,000,000 |
+| Aug | 690,000,000 |
+
+The **numerator follows the current filter** while the denominator stays the
+whole month's sales — so filtering to one item group reads as "this group's
+packaging ate x% of revenue". Months with no revenue figure show no percentage
+rather than a zero, and blended totals count only months that have one, so
+numerator and denominator always cover the same span. `Total (%)` on the
+percentage sheet is revenue-weighted, not a mean of the monthly shares.
+
+---
+
 | On screen | Column in the export | Is |
 |---|---|---|
 | **FG Qty** | `Sum of Qty` | finished goods produced |
 | **PM Cost** | `Sum of PKg Cost` | packing material cost |
 | **PM Cost per kg** | `PKg Cost / Qty` | packaging cost per kg |
+| **% of Revenue** | `PM Cost % of Revenue` | that cost against monthly sales |
+
+`Sum of Qty` (FG Qty) stays a KPI tile and a column in every table and export
+sheet — it is the denominator of cost per kg — but it is no longer charted.
 
 **Every chart prints its value for every month** — above each column, above each
 line marker, and at each bar end. Magnitudes are shortened (`4.7 L`, `52k`), the
@@ -92,7 +119,8 @@ trusting this app.
 | **Raw Data** | Your source rows, laid out `Date 1`, `Month`, source columns…, `PKg Cost`. All three derived columns are formulas: `=INT($C2)`, a `CHOOSE(MONTH(...))` month name, and `=$Q2*$U2/100`. |
 | **Monthly Trend** | One row per item group, three columns per month, plus a Total block. Every cell is a `SUMIFS` carrying all three conditions. |
 | **Warehouse Trend** | The same pivot with `Target Warehouse` added as the leading column, so the trend can be read one warehouse at a time. Its `SUMIFS` carry the warehouse as a fourth criterion. |
-| **Month Totals** | The same data by month. |
+| **Month Totals** | The same data by month, plus `Revenue` and `PM Cost % of Revenue`. |
+| **PM Cost % of Revenue** | Item group down, month across — each group's packaging cost as a share of that month's sales. |
 | **Item Group Summary** | The same data by item group, with share of cost. |
 | **BiProduct Trend** | Quantity-only pivot (`Sum of Qty`) for `Item Type = BiProduct` grouped by Target Warehouse, Item Group, and Month. |
 | **Logic & Audit** | The conditions restated beside the control totals and checks. |

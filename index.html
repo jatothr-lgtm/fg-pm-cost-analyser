@@ -383,9 +383,9 @@ td.num{font-variant-numeric:tabular-nums}
       <div class="field spacer">
         <label for="fMetric">Compare</label>
         <div class="seg multi" id="fMetric" role="group" aria-label="Metrics to chart">
-          <button data-v="qty" aria-pressed="true">FG Qty</button>
           <button data-v="cost" aria-pressed="true">PM Cost</button>
           <button data-v="ratio" aria-pressed="true">PM Cost per kg</button>
+          <button data-v="pct" aria-pressed="true">% of Revenue</button>
         </div>
       </div>
       <div class="field spacer">
@@ -394,16 +394,12 @@ td.num{font-variant-numeric:tabular-nums}
           <code>PKg Cost = Total Amount &times; PKG / 100</code>
           <code>Item Type = FG</code>
           <code>PKg Cost &divide; Qty</code>
+          <code>PKg Cost &divide; Revenue &times; 100</code>
         </div>
       </div>
     </div>
 
     <div class="charts three">
-      <div class="card" id="cardQty">
-        <h3>FG Qty by month</h3>
-        <div class="csub">Sum of Qty, FG rows only</div>
-        <figure><svg class="chart" id="cQty" role="img" aria-label="FG Qty by month"></svg></figure>
-      </div>
       <div class="card" id="cardCost">
         <h3>PM Cost by month</h3>
         <div class="csub">Sum of PKg Cost &mdash; Total Amount &times; PKG / 100</div>
@@ -413,6 +409,11 @@ td.num{font-variant-numeric:tabular-nums}
         <h3>PM Cost per kg by month</h3>
         <div class="csub">PKg Cost &divide; Qty, re-derived from both totals</div>
         <figure><svg class="chart" id="cRatio" role="img" aria-label="PM Cost per kg by month"></svg></figure>
+      </div>
+      <div class="card" id="cardPct">
+        <h3>PM Cost as % of revenue</h3>
+        <div class="csub" id="sPct">PKg Cost &divide; monthly revenue &times; 100</div>
+        <figure><svg class="chart" id="cPct" role="img" aria-label="PM Cost as percent of revenue by month"></svg></figure>
       </div>
     </div>
 
@@ -435,6 +436,7 @@ td.num{font-variant-numeric:tabular-nums}
       <button role="tab" aria-selected="false" data-t="months">Month Totals</button>
       <button role="tab" aria-selected="false" data-t="groups">Item Group Summary</button>
       <button role="tab" aria-selected="false" data-t="wh">Warehouse Trend</button>
+      <button role="tab" aria-selected="false" data-t="pct">% of Revenue</button>
       <button role="tab" aria-selected="false" data-t="biproduct">BiProduct Trend</button>
       <button role="tab" aria-selected="false" data-t="audit">Conditions &amp; Audit</button>
     </div>
@@ -461,6 +463,6 @@ td.num{font-variant-numeric:tabular-nums}
 </div>
 <div class="tip" id="tip" role="status"></div>
 
-<script src="assets/app.js?v=16"></script>
+<script src="assets/app.js?v=18"></script>
 </body>
 </html>

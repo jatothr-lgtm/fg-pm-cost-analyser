@@ -38,6 +38,17 @@ const MONTH_LOOKUP = {
   oct: 'Oct', october: 'Oct', nov: 'Nov', november: 'Nov', dec: 'Dec', december: 'Dec'
 };
 
+/* Monthly revenue in INR. Supplied figures - not derived from the extract, so
+   they live here and nowhere else. Add a month when it closes; a month that is
+   absent gets no percentage rather than a misleading zero. */
+const REVENUE = { Apr: 410800000, May: 516800000, Jun: 530000000, Jul: 605000000, Aug: 690000000 };
+
+/* PM Cost as a share of the month's revenue. The numerator follows whatever is
+   selected - all item groups, or one - while the denominator is always the whole
+   month's sales, which is what makes a single group's number readable as "this
+   group's packaging ate x% of revenue". */
+const pctOfRevenue = (cost, month) => REVENUE[month] ? cost / REVENUE[month] * 100 : null;
+
 const UNKNOWN = 'Unknown';
 const FG = 'FG';
 
@@ -350,7 +361,10 @@ function run(buffer, opts) {
   const monthTotals = months.map(m => {
     const cs = long.filter(c => c.month === m);
     const qty = cs.reduce((s, c) => s + c.qty, 0), cost = cs.reduce((s, c) => s + c.cost, 0);
-    return { month: m, monthNum: MONTH_NUM[m] || 99, qty, cost, ratio: ratio(qty, cost) };
+    return {
+      month: m, monthNum: MONTH_NUM[m] || 99, qty, cost, ratio: ratio(qty, cost),
+      revenue: REVENUE[m] || null, pct: pctOfRevenue(cost, m)
+    };
   });
   const groupTotals = groups.map(g => {
     const cs = long.filter(c => c.group === g);
@@ -382,7 +396,7 @@ function run(buffer, opts) {
     sheetName: picked.name, sheets, rowCount: rows.length, columns, hasTotalAmount, hasTotalCost,
     hasWh: columns.includes('Target Warehouse'),
     months, groups, warehouses, long, biLong, trend, whTrend, biWhTrend,
-    monthTotals, groupTotals, audit, checks
+    monthTotals, groupTotals, audit, checks, revenue: REVENUE
   };
 }
 
@@ -606,9 +620,16 @@ function buildWorkbook(res, opts) {
   /* -------------------------------------------------------------- Month Totals
      The trend read the other way round: one row per month. */
   {
-    const header = ['Month', 'Month No.', 'Sum of Qty', 'Sum of PKg Cost', 'PKg Cost / Qty'];
-    const body = res.monthTotals.map(m => [m.month, m.monthNum, m.qty, m.cost, m.ratio]);
-    body.push(['Grand Total', '', a0.qtyTotal, a0.costTotal, ratio(a0.qtyTotal, a0.costTotal)]);
+    const header = ['Month', 'Month No.', 'Sum of Qty', 'Sum of PKg Cost', 'PKg Cost / Qty',
+      'Revenue', 'PM Cost % of Revenue'];
+    const revTot = res.monthTotals.reduce((t, m) => t + (m.revenue || 0), 0);
+    // only months with a revenue figure enter the blended share, or the
+    // numerator would cover months the denominator does not
+    const costWithRev = res.monthTotals.reduce((t, m) => t + (m.revenue ? m.cost : 0), 0);
+    const body = res.monthTotals.map(m =>
+      [m.month, m.monthNum, m.qty, m.cost, m.ratio, m.revenue || '', m.pct === null ? '' : m.pct]);
+    body.push(['Grand Total', '', a0.qtyTotal, a0.costTotal, ratio(a0.qtyTotal, a0.costTotal),
+      revTot || '', revTot ? costWithRev / revTot * 100 : '']);
     const ws = addAoa('Month Totals', header, body, false);
     const last = body.length;
     for (let i = 0; i < body.length; i++) {
@@ -624,6 +645,66 @@ function buildWorkbook(res, opts) {
         setFmt(ws, r, 2, '#,##0.00'); setFmt(ws, r, 3, '#,##0.0000');
       }
       setFormula(ws, r, 4, `IF(C${row}=0,0,D${row}/C${row})`, body[i][4], '#,##0.0000');
+      // revenue is a supplied constant; the share of it is a formula
+      if (body[i][5] !== '') {
+        setFmt(ws, r, 5, '#,##0');
+        setFormula(ws, r, 6, `IF(F${row}=0,"",D${row}/F${row}*100)`, body[i][6], '#,##0.00');
+      }
+    }
+  }
+
+  /* --------------------------------------------------- PM Cost % of Revenue
+     Item group down, month across. Each cell is that group's packing-material
+     cost as a share of the whole month's sales, so a single row reads as "this
+     group's packaging ate x% of revenue". Only months that have a revenue
+     figure get a column. */
+  if (res.monthTotals.some(m => m.revenue)) {
+    const revMonths = res.monthTotals.filter(m => m.revenue).map(m => m.month);
+    const revRow = revMonths.map(m => REVENUE[m]);
+    const revSum = revRow.reduce((a, b) => a + b, 0);
+    const at = new Map();
+    res.long.forEach(c => {
+      const k = c.group + '||' + c.month;
+      at.set(k, (at.get(k) || 0) + c.cost);
+    });
+    const header = ['Item Group'].concat(revMonths.map(m => `${m} (%)`), ['Total (%)']);
+    const body = res.groups.map(g => {
+      const line = [g];
+      let cost = 0;
+      revMonths.forEach(m => {
+        const c = at.get(g + '||' + m) || 0;
+        cost += c;
+        line.push(pctOfRevenue(c, m) || 0);
+      });
+      line.push(revSum ? cost / revSum * 100 : 0);
+      return line;
+    });
+    const grand = ['Grand Total'];
+    for (let c = 1; c < header.length; c++) grand.push(body.reduce((t, r) => t + r[c], 0));
+    body.push(grand);
+
+    const ws = addAoa('PM Cost % of Revenue', header, body, false);
+    ws['!cols'] = header.map((h, i) => ({ wch: i ? 16 : 22 }));
+    const last = body.length;
+    for (let i = 0; i < body.length; i++) {
+      const r = i + 1, row = r + 1;
+      const isGrand = body[i][0] === 'Grand Total';
+      revMonths.forEach((m, j) => {
+        const c = j + 1, cl = COL(c);
+        if (isGrand) setFormula(ws, r, c, `SUM(${cl}2:${cl}${last})`, body[i][c], '#,##0.00');
+        else if (rawRefs) {
+          const crit = `${rawRefs.group},$A${row},${rawRefs.month},"${m}",${rawRefs.type},"FG"`;
+          setFormula(ws, r, c, `SUMIFS(${rawRefs.pkgCost},${crit})/${revRow[j]}*100`,
+            body[i][c], '#,##0.00');
+        } else setFmt(ws, r, c, '#,##0.00');
+      });
+      // Total (%) is the row's cost over the revenue of the same months, i.e.
+      // the monthly shares weighted by each month's revenue - not their mean
+      const tc = revMonths.length + 1, tl = COL(tc);
+      setFormula(ws, r, tc,
+        isGrand ? `SUM(${tl}2:${tl}${last})`
+                : `(${revMonths.map((_, j) => `${COL(j + 1)}${row}*${revRow[j]}`).join('+')})/${revSum}`,
+        body[i][tc], '#,##0.00');
     }
   }
 
@@ -662,6 +743,8 @@ function buildWorkbook(res, opts) {
     ['   Total Amount', res.hasTotalAmount ? 'taken from the file' : 'derived as Total Amount', ''],
     ['   Formula', '=N2*U2/100',
       'Total Amount x PKG / 100'],
+    ['6. PM Cost % of Revenue', 'PKg Cost / monthly revenue x 100',
+      'Revenue is a supplied constant, whole-month; the cost follows the filter'],
     ['2. Row filter', 'Item Type = FG only', 'RM, PKG, BiProduct and any other type are excluded'],
     ['3. Packaging cost per kg', 'SUM(PKg Cost) / SUM(Qty)',
       'Totals re-derive the ratio; never an average of the monthly ratios'],

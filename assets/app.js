@@ -8,7 +8,7 @@
 'use strict';
 
 // bumped whenever worker.js changes, so browsers never run a cached worker
-const BUILD = '16';
+const BUILD = '18';
 self.__BUILD = BUILD;
 
 const $ = s => document.querySelector(s);
@@ -37,11 +37,12 @@ const METRICS = ['Sum of Qty', 'Sum of PKg Cost', 'PKg Cost / Qty'];
    export. FG Qty is finished goods, PM Cost is the packing material, and the
    ratio is packaging cost per kg. */
 const METRIC = {
-  qty:   { key: 'qty',   name: 'FG Qty',         col: 'Sum of Qty',      dp: 2, card: '#cardQty' },
-  cost:  { key: 'cost',  name: 'PM Cost',        col: 'Sum of PKg Cost', dp: 2, card: '#cardCost' },
-  ratio: { key: 'ratio', name: 'PM Cost per kg', col: 'PKg Cost / Qty',  dp: 4, card: '#cardRatio' }
+  cost:  { key: 'cost',  name: 'PM Cost',        col: 'Sum of PKg Cost',      dp: 2, card: '#cardCost' },
+  ratio: { key: 'ratio', name: 'PM Cost per kg', col: 'PKg Cost / Qty',       dp: 2, card: '#cardRatio' },
+  pct:   { key: 'pct',   name: '% of Revenue',   col: 'PM Cost % of Revenue', dp: 2, card: '#cardPct' }
 };
-const METRIC_ORDER = ['qty', 'cost', 'ratio'];
+const METRIC_ORDER = ['cost', 'ratio', 'pct'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const ratio = (q, c) => q ? c / q : 0;
 
 /* ------------------------------------------------------------------ state */
@@ -165,17 +166,31 @@ const groupsIn = rows => [...new Set(rows.map(r => r.group))].sort((a, b) => a.l
 function byMonth(rows) {
   const m = new Map(monthsIn(rows).map(x => [x, { month: x, qty: 0, cost: 0 }]));
   rows.forEach(r => { const c = m.get(r.month); if (c) { c.qty += r.qty; c.cost += r.cost; } });
-  const out = [...m.values()]; out.forEach(c => c.ratio = ratio(c.qty, c.cost));
+  const out = [...m.values()];
+  out.forEach(c => {
+    c.ratio = ratio(c.qty, c.cost);
+    // the cost follows the current filter, the revenue is the whole month
+    c.revenue = (result.revenue || {})[c.month] || 0;
+    c.pct = c.revenue ? c.cost / c.revenue * 100 : 0;
+    c.hasRev = !!c.revenue;
+  });
   return out;
 }
 function byGroup(rows) {
+  const rev = (result.revenue || {});
+  const revTot = monthsIn(rows).reduce((t, m) => t + (rev[m] || 0), 0);
   const m = new Map();
   rows.forEach(r => {
     let c = m.get(r.group);
-    if (!c) m.set(r.group, c = { group: r.group, qty: 0, cost: 0 });
+    if (!c) m.set(r.group, c = { group: r.group, qty: 0, cost: 0, costWithRev: 0 });
     c.qty += r.qty; c.cost += r.cost;
+    if (rev[r.month]) c.costWithRev += r.cost;
   });
-  const out = [...m.values()]; out.forEach(c => c.ratio = ratio(c.qty, c.cost));
+  const out = [...m.values()];
+  out.forEach(c => {
+    c.ratio = ratio(c.qty, c.cost);
+    c.pct = revTot ? c.costWithRev / revTot * 100 : 0;
+  });
   return out.sort((a, b) => b.cost - a.cost);
 }
 function byWarehouse(rows) {
@@ -190,7 +205,15 @@ function byWarehouse(rows) {
 }
 const totalsOf = rows => {
   const qty = rows.reduce((a, r) => a + r.qty, 0), cost = rows.reduce((a, r) => a + r.cost, 0);
-  return { qty, cost, ratio: ratio(qty, cost) };
+  // only months that have a revenue figure may enter the blended share
+  const rev = (result.revenue || {});
+  let cWith = 0, rTot = 0;
+  monthsIn(rows).forEach(m => {
+    if (!rev[m]) return;
+    rTot += rev[m];
+    cWith += rows.filter(r => r.month === m).reduce((a, r) => a + r.cost, 0);
+  });
+  return { qty, cost, ratio: ratio(qty, cost), revenue: rTot, pct: rTot ? cWith / rTot * 100 : 0 };
 };
 
 /* ------------------------------------------------------------------ render */
@@ -262,9 +285,10 @@ function drawTiles() {
   const tiles = [
     ['FG Qty', fmt(t.qty, 2), `Sum of Qty &middot; ${scope}`],
     ['PM Cost', fmt(t.cost, 2), 'Sum of PKg Cost &middot; Total Amount &times; PKG / 100'],
-    ['PM Cost per kg', t.qty ? fmt(t.ratio, 4) : '—', 'PKg Cost &divide; Qty, re-derived'],
-    ['FG rows', fmt(result.audit.fgRows), `of ${fmt(result.rowCount)} rows read`],
-    ['Item groups', fmt(groupsIn(rows).length), `${result.months.length} month${result.months.length === 1 ? '' : 's'} in file`]
+    ['PM Cost per kg', t.qty ? fmt(t.ratio, 2) : '—', 'PKg Cost &divide; Qty, re-derived'],
+    ['% of Revenue', t.revenue ? fmt(t.pct, 2) + '%' : '—',
+      t.revenue ? `PM Cost &divide; ${compact(t.revenue)} revenue` : 'No revenue for these months'],
+    ['FG rows', fmt(result.audit.fgRows), `of ${fmt(result.rowCount)} rows read`]
   ];
   $('#tiles').innerHTML = tiles.map(([l, v, n]) =>
     `<div class="tile"><div class="label">${l}</div><div class="value tnum">${v}</div><div class="note">${n}</div></div>`).join('');
@@ -322,6 +346,10 @@ function drawCharts() {
   METRIC_ORDER.forEach(k => { $(METRIC[k].card).hidden = !shown.has(k); });
   on.forEach(k => chartMonth('#c' + k[0].toUpperCase() + k.slice(1), m, k, METRIC[k].dp));
 
+  const scopeTxt = filters.group ? filters.group : filters.wh ? filters.wh : 'all item groups';
+  $('#sPct').innerHTML =
+    `${scopeTxt} PKg Cost &divide; the whole month&rsquo;s revenue &times; 100`;
+
   // the two lower charts follow the first metric selected
   const lead = METRIC[on[0]];
   $('#hTrend').textContent = `${lead.name} — top 5 item groups`;
@@ -340,28 +368,32 @@ function chartMonth(sel, data, key, dp) {
   clear(svg); svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
   if (!data.length) return;
 
-  const asLine = key === 'ratio';
-  const ticks = niceTicks(Math.max(...data.map(d => d[key]), 1));
+  const asLine = key === 'ratio' || key === 'pct';
+  // a month with no revenue figure gets no point at all rather than a zero
+  const plot = key === 'pct' ? data.filter(d => d.hasRev) : data;
+  const ticks = niceTicks(Math.max(...(plot.length ? plot : data).map(d => d[key]), 1));
   const top = ticks[ticks.length - 1] || 1;
   const pw = W - M.l - M.r, ph = H - M.t - M.b;
   const y = v => M.t + ph - (v / top) * ph;
   const band = pw / data.length;
   const cx = i => M.l + band * i + band / 2;
-  const label = v => key === 'ratio' ? fmt(v, v < 100 ? 2 : 0) : compact(v);
+  const label = v => key === 'cost' ? compact(v)
+    : fmt(v, v < 100 ? 2 : 0) + (key === 'pct' ? '%' : '');
 
   ticks.forEach(t => {
     svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: y(t), y2: y(t), stroke: css('--grid'), 'stroke-width': 1 }));
-    svg.appendChild(axisTxt(M.l - 9, y(t) + 4, key === 'ratio' ? fmt(t, t < 10 ? 1 : 0) : compact(t), 'end'));
+    svg.appendChild(axisTxt(M.l - 9, y(t) + 4,
+      key === 'cost' ? compact(t) : fmt(t, t < 10 ? 1 : 0), 'end'));
   });
 
   if (asLine) {
     svg.appendChild(svgEl('path', {
-      d: 'M' + data.map((d, i) => `${cx(i)},${y(d[key])}`).join('L'),
+      d: 'M' + plot.map(d => `${cx(data.indexOf(d))},${y(d[key])}`).join('L'),
       fill: 'none', stroke: css('--series-1'), 'stroke-width': 2,
       'stroke-linejoin': 'round', 'stroke-linecap': 'round'
     }));
-    data.forEach((d, i) => svg.appendChild(svgEl('circle', {
-      cx: cx(i), cy: y(d[key]), r: 4, fill: css('--series-1'),
+    plot.forEach(d => svg.appendChild(svgEl('circle', {
+      cx: cx(data.indexOf(d)), cy: y(d[key]), r: 4, fill: css('--series-1'),
       stroke: css('--surface-1'), 'stroke-width': 2
     })));
   } else {
@@ -375,7 +407,8 @@ function chartMonth(sel, data, key, dp) {
   }
 
   // the value for every month, above the mark and clamped inside the plot
-  data.forEach((d, i) => {
+  plot.forEach(d => {
+    const i = data.indexOf(d);
     const t = svgEl('text', {
       x: cx(i), y: Math.max(12, y(d[key]) - (asLine ? 11 : 7)),
       'text-anchor': 'middle', class: 'val-txt'
@@ -390,7 +423,9 @@ function chartMonth(sel, data, key, dp) {
     hit.addEventListener('mousemove', e => showTip(e, d.month, [
       ['FG Qty', fmt(d.qty, 2)],
       ['PM Cost', fmt(d.cost, 2)],
-      ['PM Cost per kg', fmt(d.ratio, 4)]
+      ['PM Cost per kg', fmt(d.ratio, 2)],
+      ['Revenue', d.hasRev ? fmt(d.revenue) : '—'],
+      ['% of Revenue', d.hasRev ? fmt(d.pct, 2) + '%' : '—']
     ]));
     hit.addEventListener('mouseleave', hideTip);
     svg.appendChild(hit);
@@ -414,7 +449,10 @@ function chartRatioTrend(rows, metric) {
 
   const at = new Map(rows.map(r => [r.group + '||' + r.month, r]));
   const mk = metric ? metric.key : 'ratio';
-  const valOf = c => mk === 'qty' ? c.qty : mk === 'cost' ? c.cost : ratio(c.qty, c.cost);
+  const rev = (result.revenue || {});
+  const valOf = c => mk === 'cost' ? c.cost
+    : mk === 'pct' ? (rev[c.month] ? c.cost / rev[c.month] * 100 : null)
+    : ratio(c.qty, c.cost);
   const series = top5.map((g, i) => ({
     name: g.group, colour: SERIES()[i], total: g.cost,
     pts: months.map((m, x) => {
@@ -433,7 +471,7 @@ function chartRatioTrend(rows, metric) {
   ticks.forEach(t => {
     svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: y(t), y2: y(t), stroke: css('--grid'), 'stroke-width': 1 }));
     svg.appendChild(axisTxt(M.l - 9, y(t) + 4,
-      mk === 'ratio' ? fmt(t, t < 10 ? 1 : 0) : compact(t), 'end'));
+      mk === 'cost' ? compact(t) : fmt(t, t < 10 ? 1 : 0), 'end'));
   });
   months.forEach((m, i) => svg.appendChild(axisTxt(x(i), H - 10, m)));
 
@@ -484,7 +522,7 @@ function chartRatioTrend(rows, metric) {
     hit.addEventListener('mousemove', e => showTip(e, m,
       series.map(s => {
         const p = s.pts[i];
-        return [s.name, p.v === null ? '—' : fmt(p.v, mk === 'ratio' ? 4 : 2)];
+        return [s.name, p.v === null ? '—' : fmt(p.v, 2) + (mk === 'pct' ? '%' : '')];
       })));
     hit.addEventListener('mouseleave', hideTip);
     svg.appendChild(hit);
@@ -515,7 +553,7 @@ function chartGroups(data, metric) {
 
   ticks.forEach(t => {
     svg.appendChild(svgEl('line', { x1: x(t), x2: x(t), y1: M.t, y2: H - M.b, stroke: css('--grid'), 'stroke-width': 1 }));
-    svg.appendChild(axisTxt(x(t), H - 10, compact(t)));
+    svg.appendChild(axisTxt(x(t), H - 10, mk === 'cost' ? compact(t) : fmt(t, t < 10 ? 1 : 0)));
   });
 
   rows.forEach((d, i) => {
@@ -532,14 +570,15 @@ function chartGroups(data, metric) {
       x: Math.min(x(gv(d)) + 8, W - 4), y: yy + bh / 2 + 4,
       'text-anchor': 'start', class: 'val-txt'
     });
-    vt.textContent = mk === 'ratio' ? fmt(gv(d), 2) : compact(gv(d));
+    vt.textContent = mk === 'cost' ? compact(gv(d)) : fmt(gv(d), 2) + (mk === 'pct' ? '%' : '');
     svg.appendChild(vt);
 
     const hit = svgEl('rect', { x: M.l, y: M.t + i * rowH, width: pw, height: rowH, fill: 'transparent' });
     hit.addEventListener('mousemove', e => showTip(e, d.group, [
       ['FG Qty', fmt(d.qty, 2)],
       ['PM Cost', fmt(d.cost, 2)],
-      ['PM Cost per kg', fmt(d.ratio, 4)]
+      ['PM Cost per kg', fmt(d.ratio, 2)],
+      ['% of Revenue', fmt(d.pct, 2) + '%']
     ]));
     hit.addEventListener('mouseleave', hideTip);
     svg.appendChild(hit);
@@ -612,11 +651,42 @@ function tableData() {
   }
 
   if (tab === 'months') {
-    const header = ['Month', 'Month No.', ...METRICS];
-    const body = byMonth(rows).map(m => [m.month, result.months.indexOf(m.month) + 1, m.qty, m.cost, m.ratio]);
+    const header = ['Month', 'Month No.', ...METRICS, 'Revenue', 'PM Cost % of Revenue'];
+    const body = byMonth(rows).map(m => [m.month, MONTHS.indexOf(m.month) + 1,
+      m.qty, m.cost, m.ratio, m.hasRev ? m.revenue : '—', m.hasRev ? m.pct : '—']);
     const t = totalsOf(rows);
-    body.push(['Grand Total', '', t.qty, t.cost, t.ratio]);
-    return { header, body, textCols: 2, totalLast: true, dec: c => (c === 2 ? 2 : 4) };
+    body.push(['Grand Total', '', t.qty, t.cost, t.ratio,
+      t.revenue || '—', t.revenue ? t.pct : '—']);
+    return { header, body, textCols: 2, totalLast: true, dec: c => 2, pctCols: [6] };
+  }
+
+  if (tab === 'pct') {
+    // one row per item group, one column per month that has a revenue figure
+    const rev = (result.revenue || {});
+    const months = monthsIn(rows).filter(m => rev[m]);
+    if (!months.length) return { header: ['Item Group'], body: [], textCols: 1 };
+    const at = new Map();
+    rows.forEach(r => {
+      const k = r.group + '||' + r.month;
+      at.set(k, (at.get(k) || 0) + r.cost);
+    });
+    const revTot = months.reduce((t, m) => t + rev[m], 0);
+    const header = ['Item Group', ...months.map(m => `${m} (%)`), 'Total (%)'];
+    const body = groupsIn(rows).map(g => {
+      const line = [g]; let cost = 0;
+      months.forEach(m => {
+        const c = at.get(g + '||' + m) || 0;
+        cost += c;
+        line.push(c / rev[m] * 100);
+      });
+      line.push(cost / revTot * 100);
+      return line;
+    });
+    const grand = ['Grand Total'];
+    for (let c = 1; c < header.length; c++) grand.push(body.reduce((t, r) => t + r[c], 0));
+    body.push(grand);
+    return { header, body, textCols: 1, totalLast: true, dec: c => 2,
+             pctCols: header.map((h, i) => i).filter(i => i > 0) };
   }
 
   if (tab === 'groups') {
@@ -752,7 +822,7 @@ function drawTable() {
   }
   $('#search').hidden = false;
 
-  const { header, body, textCols, totalLast, dec, pct } = tableData();
+  const { header, body, textCols, totalLast, dec, pct, pctCols } = tableData();
   const grand = totalLast && body.length ? body[body.length - 1] : null;
   let rows = grand ? body.slice(0, -1) : body;
 
@@ -773,6 +843,7 @@ function drawTable() {
   const cell = (v, i) => {
     if (typeof v === 'number') {
       if (pct === i) return `<td class="num">${(v * 100).toFixed(1)}%</td>`;
+      if (pctCols && pctCols.includes(i)) return `<td class="num">${fmt(v, 2)}%</td>`;
       if (i < textCols) return `<td class="num">${fmt(v)}</td>`;
       return `<td class="num">${fmt(v, dec ? dec(i) : 2)}</td>`;
     }

@@ -13,36 +13,23 @@ upload size limit to fight.
 
 These are the whole calculation. Nothing else is applied.
 
-### 1. PKg Cost = Total Cost × PKG / 100
+### 1. PKg Cost = Total Amount × PKG / 100
 
 `PKG` is a **percentage held as a plain number**, so `10.55` means 10.55%.
-`Total Cost` is `Value In FG + Additional Cost`; if a future export omits the
-column it is reconstructed from those two.
+`Total Amount` is taken from the file; if a future export omits the column, it is derived from available amount fields or `Value In FG + Additional Cost`.
 
-In the reference layout this is literally `=Q2*U2/100` — Q is `Total Cost`,
-U is `PKG`.
-
-> This is **not** `Value In FG × PKG / 100`. Checked over all 11,503 rows of the
-> reference extract:
->
-> | Variant | Max difference from the file's own `PKg Cost` column |
-> |---|---|
-> | `Total Cost × PKG / 100` | **3.6e-15** — exact |
-> | `Value In FG × PKG / 100` | 25.75 — wrong |
+In the reference layout this is written as `=N2*U2/100` — N is `Total Amount`, U is `PKG`.
 
 ### 2. Item Type = FG only
 
 Only finished-goods rows enter the analysis. `RM`, `PKG`, `BiProduct` and
 anything else are excluded outright. The app reports how many rows it dropped.
 
-### 3. Packaging cost per kg = SUM(Qty) ÷ SUM(PKg Cost)
+### 3. Packaging cost per kg = SUM(PKg Cost) ÷ SUM(Qty)
 
-Kept in that order because it is what the reference pivot shows. Totals
+Calculated by dividing `Sum of PKg Cost` by `Sum of Qty`. Totals
 re-derive the ratio from the summed numerator and denominator — **never** an
 average of the monthly ratios.
-
-Note the ratio is kg per unit cost, so the name reads inverted relative to the
-arithmetic; actual cost per kg would be the reciprocal.
 
 ### 4 & 5. Date 1 and Month are derived from Date
 
@@ -80,7 +67,7 @@ three it runs three across.
 |---|---|---|
 | **FG Qty** | `Sum of Qty` | finished goods produced |
 | **PM Cost** | `Sum of PKg Cost` | packing material cost |
-| **PM Cost per kg** | `Qty / PKg Cost` | packaging cost per kg |
+| **PM Cost per kg** | `PKg Cost / Qty` | packaging cost per kg |
 
 **Every chart prints its value for every month** — above each column, above each
 line marker, and at each bar end. Magnitudes are shortened (`4.7 L`, `52k`), the
@@ -89,8 +76,8 @@ ratio is shown to two decimals.
 The two charts below follow whichever metric is selected first: the top five item
 groups month by month, and the same metric ranked by item group.
 
-The export keeps the `Sum of Qty` / `Sum of PKg Cost` / `Qty / PKg Cost` column
-names, matching the reference pivot's language.
+The export keeps the `Sum of Qty` / `Sum of PKg Cost` / `PKg Cost / Qty` column
+names.
 
 ---
 

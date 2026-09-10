@@ -6,22 +6,19 @@
 
    THE CONDITIONS  (all three are applied exactly as written)
 
-     1. PKg Cost        = Total Cost x PKG / 100
-                          Total Cost is Value In FG + Additional Cost, and PKG
-                          is a percentage held as a plain number, so 10.55
-                          means 10.55%. This is NOT Value In FG x PKG / 100 -
-                          that variant is off by up to 25.75 on the reference
-                          extract, while this one reproduces it exactly.
+     1. PKg Cost        = Total Amount x PKG / 100
+                          Total Amount (or Total Cost) is multiplied by PKG %,
+                          where PKG is a percentage held as a plain number, so 10.55
+                          means 10.55%. Formulated as =N2*U2/100.
 
      2. Item Type = FG  Only finished-goods rows enter the analysis. RM, PKG,
                         BiProduct and anything else are excluded outright.
 
      3. Packaging cost per kg
-                        = SUM(Qty) / SUM(PKg Cost)
-                          Kept in that order because it is what the reference
-                          pivot shows. Totals re-derive the ratio from the
-                          summed numerator and denominator - never an average
-                          of the monthly ratios.
+                        = SUM(PKg Cost) / SUM(Qty)
+                          Calculated as total PKg Cost divided by total Qty.
+                          Totals re-derive the ratio from the summed numerator
+                          and denominator - never an average of the monthly ratios.
 
    DERIVED COLUMNS      Date 1 and Month both come from Date. Month is written
                         as a real month name (Jan, Feb, Mar ...), never 1-12,
@@ -99,20 +96,23 @@ function dateOnly(row) {
 }
 
 /* ------------------------------------------------------------------- costs */
-// Total Cost is used as given, and reconstructed when the export omits it.
-const totalCostOf = (row, hasTotalCost) => hasTotalCost
-  ? num(row['Total Cost'])
-  : num(row['Value In FG']) + num(row['Additional Cost']);
+// Total Amount is used as given, and reconstructed when omitted.
+const totalAmountOf = (row, hasTotalAmount) => {
+  if (hasTotalAmount) return num(row['Total Amount']);
+  if (row['Amount'] !== undefined && row['Amount'] !== null) return num(row['Amount']);
+  if (row['Total Cost'] !== undefined && row['Total Cost'] !== null) return num(row['Total Cost']);
+  return num(row['Value In FG']) + num(row['Additional Cost']);
+};
 
 // CONDITION 1
-const pkgCostOf = (row, hasTotalCost) => totalCostOf(row, hasTotalCost) * num(row['PKG']) / 100;
+const pkgCostOf = (row, hasTotalAmount) => totalAmountOf(row, hasTotalAmount) * num(row['PKG']) / 100;
 
 /* -------------------------------------------------------------------------
    Aggregate. One pass over the rows, FG only, keyed by Item Group + Month +
    Target Warehouse. The warehouse only makes the grain finer - every total
    downstream sums the same cells, so no existing figure moves.
    ------------------------------------------------------------------------- */
-function aggregate(rows, hasTotalCost) {
+function aggregate(rows, hasTotalAmount) {
   const cells = new Map();                 // "group|month|warehouse" -> cell
   const audit = {
     typeCounts: {}, fgRows: 0, unknownMonthRows: 0, blankPkgRows: 0,
@@ -132,7 +132,7 @@ function aggregate(rows, hasTotalCost) {
     if (month === UNKNOWN) audit.unknownMonthRows++;
     const group = txt(r['Item Group']) || UNKNOWN;
     const qty = num(r['Qty']);
-    const cost = pkgCostOf(r, hasTotalCost);
+    const cost = pkgCostOf(r, hasTotalAmount);
 
     if (!num(r['PKG'])) audit.blankPkgRows++;
     if (cost < 0) audit.negativeCostRows++;
@@ -164,9 +164,9 @@ function aggregate(rows, hasTotalCost) {
    Month-wise pivot: one row per Item Group, three columns per month.
    ------------------------------------------------------------------------- */
 // CONDITION 3
-const ratio = (qty, cost) => cost ? qty / cost : 0;
+const ratio = (qty, cost) => qty ? cost / qty : 0;
 
-const METRICS = ['Sum of Qty', 'Sum of PKg Cost', 'Qty / PKg Cost'];
+const METRICS = ['Sum of Qty', 'Sum of PKg Cost', 'PKg Cost / Qty'];
 
 /* One pivot builder for both tabs. `idxFields` names the row dimensions, so
    ['group'] gives the original Item Group trend and ['targetWh','group'] gives
@@ -226,7 +226,9 @@ function scoreSheets(wb) {
       .map(h => txt(h));
     const have = NEEDED.filter(n => head.includes(n));
     let score = have.length * 10;
-    if (head.includes('Total Cost')) score += 6;
+    if (head.includes('Total Amount')) score += 6;
+    else if (head.includes('Total Cost')) score += 5;
+    else if (head.includes('Amount')) score += 4;
     else if (head.includes('Value In FG') && head.includes('Additional Cost')) score += 1;
     if (head.includes('Date')) score += 2;
     else if (head.includes('Month')) score += 1;
@@ -235,7 +237,7 @@ function scoreSheets(wb) {
       name, score,
       rows: XLSX.utils.decode_range(ws['!ref']).e.r,
       usable: have.length === NEEDED.length &&
-              (head.includes('Total Cost') ||
+              (head.includes('Total Amount') || head.includes('Total Cost') || head.includes('Amount') ||
                (head.includes('Value In FG') && head.includes('Additional Cost'))) &&
               (head.includes('Date') || head.includes('Month'))
     });
@@ -275,18 +277,20 @@ function run(buffer, opts) {
       `Sheet "${picked.name}" is missing required column(s): ${missing.join(', ')}.\n\n` +
       `Columns found:\n${columns.join(', ')}`);
   }
+  const hasTotalAmount = columns.includes('Total Amount');
   const hasTotalCost = columns.includes('Total Cost');
-  if (!hasTotalCost && !(columns.includes('Value In FG') && columns.includes('Additional Cost'))) {
+  const hasAmount = columns.includes('Amount');
+  if (!hasTotalAmount && !hasTotalCost && !hasAmount && !(columns.includes('Value In FG') && columns.includes('Additional Cost'))) {
     throw new Error(
-      'Need either a "Total Cost" column, or both "Value In FG" and "Additional Cost" ' +
-      'so Total Cost can be derived.\n\n' + `Columns found:\n${columns.join(', ')}`);
+      'Need either a "Total Amount" (or "Total Cost") column, or both "Value In FG" and "Additional Cost" ' +
+      'so total amount can be derived.\n\n' + `Columns found:\n${columns.join(', ')}`);
   }
   if (!columns.includes('Date') && !columns.includes('Month')) {
     throw new Error('Need a "Date" column, or a "Month" column, to place rows on the calendar.');
   }
 
   post('Applying FG filter and PKg Cost', 52);
-  const { long, audit } = aggregate(rows, hasTotalCost);
+  const { long, audit } = aggregate(rows, hasTotalAmount);
   if (!audit.fgRows) throw new Error('No rows with Item Type = FG were found, so there is nothing to analyse.');
 
   const months = MONTHS.filter(m => long.some(c => c.month === m))
@@ -328,11 +332,11 @@ function run(buffer, opts) {
   }
 
   lastRows = rows; lastColumns = columns;
-  lastMeta = { hasTotalCost };
+  lastMeta = { hasTotalAmount, hasTotalCost };
 
   post('Done', 95);
   return {
-    sheetName: picked.name, sheets, rowCount: rows.length, columns, hasTotalCost,
+    sheetName: picked.name, sheets, rowCount: rows.length, columns, hasTotalAmount, hasTotalCost,
     hasWh: columns.includes('Target Warehouse'),
     months, groups, warehouses, long, trend, whTrend,
     monthTotals, groupTotals, audit, checks
@@ -383,11 +387,11 @@ function buildWorkbook(res, opts) {
     // Target Warehouse joins CORE because the Warehouse Trend tab's SUMIFS
     // criteria point at it - without the column those cells cannot be written.
     const CORE = ['Item Group', 'Item Type', 'Qty', 'PKG']
-      .concat(res.hasTotalCost ? ['Total Cost'] : ['Value In FG', 'Additional Cost'])
+      .concat(res.hasTotalAmount ? ['Total Amount'] : (res.hasTotalCost ? ['Total Cost'] : ['Value In FG', 'Additional Cost']))
       .concat(cols.includes('Date') ? ['Date'] : [])
       .concat(cols.includes('Target Warehouse') ? ['Target Warehouse'] : []);
-    const PRIORITY = CORE.concat(['Item Name', 'Workorder', 'Item Code',
-      'Total Amount', 'Amount', 'Basic Rate', 'Source Warehouse']);
+    const PRIORITY = CORE.concat(['Total Amount', 'Item Name', 'Workorder', 'Item Code',
+      'Amount', 'Basic Rate', 'Source Warehouse']);
 
     const sample = lastRows.slice(0, 500);
     const costOf = c => {
@@ -398,8 +402,8 @@ function buildWorkbook(res, opts) {
     const cost = {}; for (const c of cols) cost[c] = costOf(c);
 
     // Date 1 (~34), Month (~86, a CHOOSE so it never depends on locale),
-    // PKg Cost (~70), and Total Cost when it has to be derived (~40)
-    let budget = BUDGET - (190 + (res.hasTotalCost ? 0 : 40)) * n;
+    // PKg Cost (~70), and Total Amount when it has to be derived (~40)
+    let budget = BUDGET - (190 + (res.hasTotalAmount || res.hasTotalCost ? 0 : 40)) * n;
     const keep = new Set();
     const order = PRIORITY.filter(c => cols.includes(c))
       .concat(cols.filter(c => !PRIORITY.includes(c)));
@@ -411,8 +415,9 @@ function buildWorkbook(res, opts) {
     const kept = cols.filter(c => keep.has(c));
     rawDropped = cols.filter(c => !keep.has(c));
 
-    const derivedTotal = !res.hasTotalCost;
-    const head = ['Date 1', 'Month'].concat(kept, derivedTotal ? ['Total Cost'] : [], ['PKg Cost']);
+    const derivedTotal = !res.hasTotalAmount && !res.hasTotalCost && !res.hasAmount;
+    const totalColName = res.hasTotalAmount ? 'Total Amount' : (res.hasTotalCost ? 'Total Cost' : 'Total Amount');
+    const head = ['Date 1', 'Month'].concat(kept, derivedTotal ? [totalColName] : [], ['PKg Cost']);
     const body = lastRows.map(r => {
       const line = kept.map(c => {
         const v = r[c];
@@ -431,7 +436,8 @@ function buildWorkbook(res, opts) {
     const L = name => COL(at(name));
     const cDate = at('Date') >= 0 ? L('Date') : null;
     const cPkg = L('PKG');
-    const iTotal = at('Total Cost'), cTotal = COL(iTotal);
+    const iTotal = at('Total Amount') >= 0 ? at('Total Amount') : (at('Total Cost') >= 0 ? at('Total Cost') : at('Amount'));
+    const cTotal = iTotal >= 0 ? COL(iTotal) : COL(at(totalColName));
     const iPkgCost = at('PKg Cost');
     const dateIsReal = lastRows.some(r => r['Date'] instanceof Date || typeof r['Date'] === 'number');
 
@@ -448,11 +454,11 @@ function buildWorkbook(res, opts) {
       }
       if (derivedTotal) {
         setFormula(ws, r, iTotal, `$${L('Value In FG')}${row}+$${L('Additional Cost')}${row}`,
-          totalCostOf(lastRows[i], false), '#,##0.00');
+          totalAmountOf(lastRows[i], false), '#,##0.00');
       }
-      // CONDITION 1, written into the cell
+      // CONDITION 1, written into the cell: =N2*U2/100
       setFormula(ws, r, iPkgCost, `$${cTotal}${row}*$${cPkg}${row}/100`,
-        pkgCostOf(lastRows[i], res.hasTotalCost), '#,##0.0000');
+        pkgCostOf(lastRows[i], res.hasTotalAmount), '#,##0.0000');
     }
     XLSX.utils.book_append_sheet(wb, ws, RAW);
 
@@ -505,7 +511,7 @@ function buildWorkbook(res, opts) {
           setFmt(ws, r, c, '#,##0.00'); setFmt(ws, r, c + 1, '#,##0.0000');
         }
         // CONDITION 3, and it is re-derived on the Total and Grand Total too
-        setFormula(ws, r, c + 2, `IF(${cL}${row}=0,0,${qL}${row}/${cL}${row})`,
+        setFormula(ws, r, c + 2, `IF(${qL}${row}=0,0,${cL}${row}/${qL}${row})`,
           pivot.body[i][c + 2], '#,##0.0000');
       }
     }
@@ -524,7 +530,7 @@ function buildWorkbook(res, opts) {
   /* -------------------------------------------------------------- Month Totals
      The trend read the other way round: one row per month. */
   {
-    const header = ['Month', 'Month No.', 'Sum of Qty', 'Sum of PKg Cost', 'Qty / PKg Cost'];
+    const header = ['Month', 'Month No.', 'Sum of Qty', 'Sum of PKg Cost', 'PKg Cost / Qty'];
     const body = res.monthTotals.map(m => [m.month, m.monthNum, m.qty, m.cost, m.ratio]);
     body.push(['Grand Total', '', a0.qtyTotal, a0.costTotal, ratio(a0.qtyTotal, a0.costTotal)]);
     const ws = addAoa('Month Totals', header, body, false);
@@ -541,13 +547,13 @@ function buildWorkbook(res, opts) {
       } else {
         setFmt(ws, r, 2, '#,##0.00'); setFmt(ws, r, 3, '#,##0.0000');
       }
-      setFormula(ws, r, 4, `IF(D${row}=0,0,C${row}/D${row})`, body[i][4], '#,##0.0000');
+      setFormula(ws, r, 4, `IF(C${row}=0,0,D${row}/C${row})`, body[i][4], '#,##0.0000');
     }
   }
 
   /* -------------------------------------------------------- Item Group Summary */
   {
-    const header = ['Item Group', 'Sum of Qty', 'Sum of PKg Cost', 'Qty / PKg Cost', 'Share of PKg Cost'];
+    const header = ['Item Group', 'Sum of Qty', 'Sum of PKg Cost', 'PKg Cost / Qty', 'Share of PKg Cost'];
     const body = res.groupTotals.map(g =>
       [g.group, g.qty, g.cost, g.ratio, a0.costTotal ? g.cost / a0.costTotal : 0]);
     body.push(['Grand Total', a0.qtyTotal, a0.costTotal,
@@ -566,7 +572,7 @@ function buildWorkbook(res, opts) {
       } else {
         setFmt(ws, r, 1, '#,##0.00'); setFmt(ws, r, 2, '#,##0.0000');
       }
-      setFormula(ws, r, 3, `IF(C${row}=0,0,B${row}/C${row})`, body[i][3], '#,##0.0000');
+      setFormula(ws, r, 3, `IF(B${row}=0,0,C${row}/B${row})`, body[i][3], '#,##0.0000');
       setFormula(ws, r, 4, `IF($C$${gr}=0,0,C${row}/$C$${gr})`, body[i][4], '0.0%');
     }
   }
@@ -575,13 +581,13 @@ function buildWorkbook(res, opts) {
   const a = res.audit;
   const auditRows = [
     ['CONDITIONS APPLIED', '', ''],
-    ['1. PKg Cost', 'Total Cost x PKG / 100',
-      'PKG is a percent held as a number, so 10.55 means 10.55%'],
-    ['   Total Cost', res.hasTotalCost ? 'taken from the file' : 'derived as Value In FG + Additional Cost', ''],
-    ['   NOT', 'Value In FG x PKG / 100',
-      'That variant misses the reference extract by up to 25.75'],
+    ['1. PKg Cost', 'Total Amount x PKG / 100',
+      'PKG is a percent held as a number, so 10.55 means 10.55%. Formulated as =N2*U2/100'],
+    ['   Total Amount', res.hasTotalAmount ? 'taken from the file' : 'derived as Total Amount', ''],
+    ['   Formula', '=N2*U2/100',
+      'Total Amount x PKG / 100'],
     ['2. Row filter', 'Item Type = FG only', 'RM, PKG, BiProduct and any other type are excluded'],
-    ['3. Packaging cost per kg', 'SUM(Qty) / SUM(PKg Cost)',
+    ['3. Packaging cost per kg', 'SUM(PKg Cost) / SUM(Qty)',
       'Totals re-derive the ratio; never an average of the monthly ratios'],
     ['4. Date 1', 'Derived from Date', 'Time of day stripped'],
     ['5. Month', 'Derived from Date, as a month name',
@@ -608,7 +614,7 @@ function buildWorkbook(res, opts) {
     ['TOTALS', '', ''],
     ['Sum of Qty', a.qtyTotal, 'FG rows'],
     ['Sum of PKg Cost', a.costTotal, 'FG rows'],
-    ['Qty / PKg Cost', ratio(a.qtyTotal, a.costTotal), 'Re-derived from the two totals above'],
+    ['PKg Cost / Qty', ratio(a.qtyTotal, a.costTotal), 'Re-derived from the two totals above'],
     ['', '', ''],
     ['ROW TYPES SEEN', '', ''],
     ...Object.entries(a.typeCounts).sort((x, y) => y[1] - x[1]).map(([k, v]) => [k, v, 'rows']),
@@ -620,12 +626,12 @@ function buildWorkbook(res, opts) {
   wsA['!cols'] = [{ wch: 34 }, { wch: 46 }, { wch: 62 }];
   {
     const rowOf = label => auditRows.findIndex(x => x[0] === label) + 1;
-    const qR = rowOf('Sum of Qty'), cR = rowOf('Sum of PKg Cost'), rR = rowOf('Qty / PKg Cost');
+    const qR = rowOf('Sum of Qty'), cR = rowOf('Sum of PKg Cost'), rR = rowOf('PKg Cost / Qty');
     if (rawRefs) {
       setFormula(wsA, qR, 1, `SUMIF(${rawRefs.type},"FG",${rawRefs.qty})`, a.qtyTotal, '#,##0.00');
       setFormula(wsA, cR, 1, `SUMIF(${rawRefs.type},"FG",${rawRefs.pkgCost})`, a.costTotal, '#,##0.0000');
     }
-    setFormula(wsA, rR, 1, `IF(B${cR + 1}=0,0,B${qR + 1}/B${cR + 1})`,
+    setFormula(wsA, rR, 1, `IF(B${qR + 1}=0,0,B${cR + 1}/B${qR + 1})`,
       ratio(a.qtyTotal, a.costTotal), '#,##0.0000');
   }
 

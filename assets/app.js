@@ -8,7 +8,7 @@
 'use strict';
 
 // bumped whenever worker.js changes, so browsers never run a cached worker
-const BUILD = '13';
+const BUILD = '14';
 self.__BUILD = BUILD;
 
 const $ = s => document.querySelector(s);
@@ -31,7 +31,7 @@ const compact = v => {
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const SERIES = () => [1, 2, 3, 4, 5].map(i => css('--series-' + i));
 
-const METRICS = ['Sum of Qty', 'Sum of PKg Cost', 'Qty / PKg Cost'];
+const METRICS = ['Sum of Qty', 'Sum of PKg Cost', 'PKg Cost / Qty'];
 
 /* What each metric is called on screen, versus the column name it keeps in the
    export. FG Qty is finished goods, PM Cost is the packing material, and the
@@ -39,10 +39,10 @@ const METRICS = ['Sum of Qty', 'Sum of PKg Cost', 'Qty / PKg Cost'];
 const METRIC = {
   qty:   { key: 'qty',   name: 'FG Qty',         col: 'Sum of Qty',      dp: 2, card: '#cardQty' },
   cost:  { key: 'cost',  name: 'PM Cost',        col: 'Sum of PKg Cost', dp: 2, card: '#cardCost' },
-  ratio: { key: 'ratio', name: 'PM Cost per kg', col: 'Qty / PKg Cost',  dp: 4, card: '#cardRatio' }
+  ratio: { key: 'ratio', name: 'PM Cost per kg', col: 'PKg Cost / Qty',  dp: 4, card: '#cardRatio' }
 };
 const METRIC_ORDER = ['qty', 'cost', 'ratio'];
-const ratio = (q, c) => c ? q / c : 0;
+const ratio = (q, c) => q ? c / q : 0;
 
 /* ------------------------------------------------------------------ state */
 let worker = null, buffer = null, fileName = '', result = null;
@@ -238,11 +238,11 @@ function drawStatus() {
   bar.className = 'bar ' + (recomputeOk ? 'good' : 'critical');
   bar.innerHTML =
     `<span class="dot"></span><div>` +
-    `<b>PKg Cost = Total Cost &times; PKG / 100</b>` +
+    `<b>PKg Cost = Total Amount &times; PKG / 100</b>` +
     (a.hasSourcePkgCost
       ? ` &mdash; reproduces the <code>PKg Cost</code> column in your file` +
         ` (max difference <b class="tnum">${a.recomputeMaxDiff.toExponential(2)}</b>)`
-      : ` &mdash; computed from <code>Total Cost</code> and <code>PKG %</code>`) +
+      : ` &mdash; computed from <code>Total Amount</code> and <code>PKG %</code>`) +
     `<div class="muted" style="margin-top:3px">` +
     `sheet <b>${result.sheetName}</b> &middot; ` +
     `${fmt(result.rowCount)} rows read &middot; <b>${fmt(a.fgRows)}</b> FG rows analysed &middot; ` +
@@ -261,8 +261,8 @@ function drawTiles() {
   const scope = filters.month || filters.group ? 'current filters' : 'all FG rows';
   const tiles = [
     ['FG Qty', fmt(t.qty, 2), `Sum of Qty &middot; ${scope}`],
-    ['PM Cost', fmt(t.cost, 2), 'Sum of PKg Cost &middot; Total Cost &times; PKG / 100'],
-    ['PM Cost per kg', t.cost ? fmt(t.ratio, 4) : '—', 'Qty &divide; PKg Cost, re-derived'],
+    ['PM Cost', fmt(t.cost, 2), 'Sum of PKg Cost &middot; Total Amount &times; PKG / 100'],
+    ['PM Cost per kg', t.qty ? fmt(t.ratio, 4) : '—', 'PKg Cost &divide; Qty, re-derived'],
     ['FG rows', fmt(result.audit.fgRows), `of ${fmt(result.rowCount)} rows read`],
     ['Item groups', fmt(groupsIn(rows).length), `${result.months.length} month${result.months.length === 1 ? '' : 's'} in file`]
   ];
@@ -646,20 +646,19 @@ function renderAudit() {
 workbook writes each of them into the cells as live formulas.</p>
 <div class="cond">
   <div class="c"><div class="n">1</div><div>
-    <div class="ct">PKg Cost = Total Cost &times; PKG / 100</div>
+    <div class="ct">PKg Cost = Total Amount &times; PKG / 100</div>
     <div class="cd"><code>PKG</code> is a percentage held as a plain number, so <code>10.55</code>
-    means 10.55%. <code>Total Cost</code> is
-    ${result.hasTotalCost ? 'taken from the file' : 'derived as <code>Value In FG + Additional Cost</code>'}.
-    This is <b>not</b> <code>Value In FG &times; PKG / 100</code> &mdash; that variant misses the
-    reference extract by up to 25.75.</div></div></div>
+    means 10.55%. <code>Total Amount</code> is
+    ${result.hasTotalAmount ? 'taken from the file' : 'derived as <code>Total Amount / Total Cost</code>'}.
+    Formulated as <code>=N2*U2/100</code>.</div></div></div>
   <div class="c"><div class="n">2</div><div>
     <div class="ct">Item Type = FG only</div>
     <div class="cd">Only finished-goods rows enter the analysis.
     <b>${fmt(a.fgRows)}</b> of ${fmt(result.rowCount)} rows qualify;
     ${fmt(result.rowCount - a.fgRows)} were excluded.</div></div></div>
   <div class="c"><div class="n">3</div><div>
-    <div class="ct">Packaging cost per kg = SUM(Qty) &divide; SUM(PKg Cost)</div>
-    <div class="cd">Kept in that order because it is what the reference pivot shows. Totals
+    <div class="ct">Packaging cost per kg = SUM(PKg Cost) &divide; SUM(Qty)</div>
+    <div class="cd">Calculated by dividing total packaging cost by total quantity. Totals
     re-derive the ratio from the summed numerator and denominator &mdash; never an average of
     the monthly ratios.</div></div></div>
   <div class="c"><div class="n">4</div><div>
@@ -688,7 +687,7 @@ ${checks.map(c => `<tr>
 <table class="checks"><tbody>
 <tr><td class="what">Sum of Qty</td><td class="fig">${fmt(t.qty, 2)}</td></tr>
 <tr><td class="what">Sum of PKg Cost</td><td class="fig">${fmt(t.cost, 2)}</td></tr>
-<tr><td class="what">Qty / PKg Cost</td><td class="fig">${fmt(t.ratio, 4)}</td></tr>
+<tr><td class="what">PKg Cost / Qty</td><td class="fig">${fmt(t.ratio, 4)}</td></tr>
 <tr><td class="what">Sheet analysed</td><td class="fig">${result.sheetName}</td></tr>
 <tr><td class="what">Target warehouses</td><td class="fig">${(result.warehouses || []).length}</td></tr>
 </tbody></table></div>

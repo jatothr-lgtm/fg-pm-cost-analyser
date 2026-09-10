@@ -324,7 +324,7 @@ td.num{font-variant-numeric:tabular-nums}
       <div class="mark" aria-hidden="true"></div>
       <div>
         <h1>FG Packaging Cost Analyser</h1>
-        <div class="sub">Month-wise packaging cost from FG rows &middot; Total Cost &times; PKG / 100</div>
+        <div class="sub">Month-wise packaging cost from FG rows &middot; Total Amount &times; PKG / 100</div>
       </div>
     </div>
     <div class="top-actions">
@@ -342,15 +342,15 @@ td.num{font-variant-numeric:tabular-nums}
     <div class="drop" id="drop">
       <h2>Drop your production extract here</h2>
       <p>Only <code>Item Type = FG</code> rows are analysed, and packaging cost is
-         <code>Total Cost &times; PKG / 100</code>. Nothing is uploaded &mdash; the workbook is parsed
+         <code>Total Amount &times; PKG / 100</code>. Nothing is uploaded &mdash; the workbook is parsed
          and calculated entirely inside your browser.</p>
       <button class="btn primary" id="pick">Choose Excel file</button>
       <input type="file" id="file" accept=".xlsx,.xls,.xlsm" hidden>
       <div class="reqs">
         <span class="chip">Item Group</span><span class="chip">Item Type</span>
         <span class="chip">Qty</span><span class="chip">PKG</span>
-        <span class="chip">Total Cost</span>
-        <span class="chip">or Value In FG + Additional Cost</span>
+        <span class="chip">Total Amount</span>
+        <span class="chip">or Total Cost / Value In FG + Additional Cost</span>
         <span class="chip">Date or Month</span>
       </div>
       <div class="hint">.xlsx, .xls or .xlsm &middot; 100,000+ rows is fine</div>
@@ -391,9 +391,9 @@ td.num{font-variant-numeric:tabular-nums}
       <div class="field spacer">
         <label>Conditions</label>
         <div class="condline">
-          <code>PKg Cost = Total Cost &times; PKG / 100</code>
+          <code>PKg Cost = Total Amount &times; PKG / 100</code>
           <code>Item Type = FG</code>
-          <code>Qty &divide; PKg Cost</code>
+          <code>PKg Cost &divide; Qty</code>
         </div>
       </div>
     </div>
@@ -406,12 +406,12 @@ td.num{font-variant-numeric:tabular-nums}
       </div>
       <div class="card" id="cardCost">
         <h3>PM Cost by month</h3>
-        <div class="csub">Sum of PKg Cost &mdash; Total Cost &times; PKG / 100</div>
+        <div class="csub">Sum of PKg Cost &mdash; Total Amount &times; PKG / 100</div>
         <figure><svg class="chart" id="cCost" role="img" aria-label="PM Cost by month"></svg></figure>
       </div>
       <div class="card" id="cardRatio">
         <h3>PM Cost per kg by month</h3>
-        <div class="csub">Qty &divide; PKg Cost, re-derived from both totals</div>
+        <div class="csub">PKg Cost &divide; Qty, re-derived from both totals</div>
         <figure><svg class="chart" id="cRatio" role="img" aria-label="PM Cost per kg by month"></svg></figure>
       </div>
     </div>

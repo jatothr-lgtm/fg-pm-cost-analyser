@@ -1,157 +1,139 @@
-# FG / PM Cost Analyser
+# FG Packaging Cost Analyser
 
-Upload a production Excel extract, get packaging-material (PM) cost per kg by month,
-item group and warehouse, and download the finished workbook.
+Upload a production Excel extract, get a month-wise packaging-cost dashboard, and
+download a workbook where every computed cell is a live formula.
 
-Static site — no build step, no server, no database. The workbook is parsed and
-calculated entirely in the browser (Web Worker + SheetJS), so production cost data
-never leaves the machine it is opened on.
+Static site, no build step. Everything — xlsx parse, calculation, xlsx write —
+happens in the browser, so the file never leaves the machine and there is no
+upload size limit to fight.
 
-## Deploy
+---
 
-```bash
-vercel --prod
-```
+## The conditions
 
-Or connect the repo in the Vercel dashboard. Framework preset: **Other**.
-Build command: none. Output directory: `.` (repo root).
+These are the whole calculation. Nothing else is applied.
 
-## Run locally
+### 1. PKg Cost = Total Cost × PKG / 100
 
-Any static file server works. It must be served over HTTP — opening `index.html`
-from the filesystem fails, because a Web Worker cannot load from a `file://` origin.
+`PKG` is a **percentage held as a plain number**, so `10.55` means 10.55%.
+`Total Cost` is `Value In FG + Additional Cost`; if a future export omits the
+column it is reconstructed from those two.
+
+In the reference layout this is literally `=Q2*U2/100` — Q is `Total Cost`,
+U is `PKG`.
+
+> This is **not** `Value In FG × PKG / 100`. Checked over all 11,503 rows of the
+> reference extract:
+>
+> | Variant | Max difference from the file's own `PKg Cost` column |
+> |---|---|
+> | `Total Cost × PKG / 100` | **3.6e-15** — exact |
+> | `Value In FG × PKG / 100` | 25.75 — wrong |
+
+### 2. Item Type = FG only
+
+Only finished-goods rows enter the analysis. `RM`, `PKG`, `BiProduct` and
+anything else are excluded outright. The app reports how many rows it dropped.
+
+### 3. Packaging cost per kg = SUM(Qty) ÷ SUM(PKg Cost)
+
+Kept in that order because it is what the reference pivot shows. Totals
+re-derive the ratio from the summed numerator and denominator — **never** an
+average of the monthly ratios.
+
+Note the ratio is kg per unit cost, so the name reads inverted relative to the
+arithmetic; actual cost per kg would be the reciprocal.
+
+### 4 & 5. Date 1 and Month are derived from Date
+
+`Date 1` is the date with the time stripped. `Month` is a **real month name** —
+`Jan`, `Feb`, `Mar` — never `1`–`12`, and every report is ordered by calendar
+position rather than alphabetically.
+
+---
+
+## Choosing the sheet
+
+A workbook often holds several working tabs. Sheets are scored on the columns
+they carry, and **`Total Cost` is weighted heavily on purpose**: it separates the
+analysis extract from a raw stock-entry dump, and the two give very different
+answers. Row count only breaks ties.
+
+The chosen sheet is named in the status bar and can be overridden from the
+**Sheet** dropdown, which lists every tab that has the required columns.
+
+---
+
+## The export
+
+Five sheets. `Raw Data` is first, and every computed cell downstream of it is a
+`SUMIFS` back into it — so the whole calculation can be audited in Excel without
+trusting this app.
+
+| Sheet | Contents |
+|---|---|
+| **Raw Data** | Your source rows, laid out `Date 1`, `Month`, source columns…, `PKg Cost`. All three derived columns are formulas: `=INT($C2)`, a `CHOOSE(MONTH(...))` month name, and `=$Q2*$U2/100`. |
+| **Monthly Trend** | One row per item group, three columns per month, plus a Total block. Every cell is a `SUMIFS` carrying all three conditions. |
+| **Month Totals** | The same data by month. |
+| **Item Group Summary** | The same data by item group, with share of cost. |
+| **Logic & Audit** | The conditions restated beside the control totals and checks. |
+
+`Month` is written with `CHOOSE(MONTH(...))` rather than `TEXT(...,"mmm")` so the
+label can never turn into a localised month name that no longer matches the
+report columns.
+
+Filters on the page do not narrow the export — it always covers the whole file.
+
+### Size limit
+
+The browser build of SheetJS assembles the whole zip in one buffer and fails
+past roughly 90 MB. `Raw Data` is therefore budgeted: **every row is always
+kept**, and source columns are added in priority order until the budget is
+spent. Anything left out is named on `Logic & Audit`. If even the columns the
+formula chain needs will not fit, the sheet is dropped rather than truncated —
+a partial `Raw Data` tab would make every `SUMIFS` pointing at it silently wrong.
+
+---
+
+## Verified against the reference
+
+Reproduced from `Sheet1` of the reference extract, grouped by month × item group:
+
+- **All 14 item groups** in the Month 8 pivot match `Sheet3` to the last decimal
+- Grand totals exact — Jun `668,894.958 / 83,805.66487186884 / 7.981500522938144`,
+  Jul `601,023.408 / 81,435.85954810692 / 7.380328657855636`,
+  Aug `648,171.687 / 79,413.86777976828`
+- Aug's ratio is blank in `Sheet3`; it computes to `8.161946`
+- The recomputed `PKg Cost` reproduces the file's own column, max diff `3.55e-15`
+
+---
+
+## Running it
+
+Open `index.html`, or serve the folder:
 
 ```bash
 python -m http.server 5173
 ```
 
-## Input
+## Deploying to Vercel
 
-The **first sheet** of the uploaded workbook is read, **in file order**. Row order is
-load-bearing — see the bucketing rule below. Required columns:
+No build step. Framework preset **Other**, build command empty, output directory
+`.`. Or from the folder:
 
-| Column | Used for |
-|---|---|
-| `Workorder` | the grouping key for everything |
-| `Item Group` | the reporting bucket |
-| `Item Type` | `PKG` / `FG` / `RM` / `BiProduct` |
-| `Qty` | FG quantity |
-| `Total Amount` | PM Value, FG Value |
-| `Value In FG` | PM Qty |
-| `PKG` | PM Qty (a percentage held as a plain number: `2.02` means 2.02%) |
-| `Date` or `Month` | the month bucket |
-| `Target Warehouse` / `Source Warehouse` | optional; default to `Unknown` |
-
-Leading and trailing spaces in headers are stripped.
-
-## The calculation
-
-### PM Value
-
-```
-PM Value(workorder) = SUM(Total Amount) WHERE Item Type = 'PKG'
+```bash
+vercel --prod
 ```
 
-`RM`, `FG` and `BiProduct` rows contribute nothing.
-
-### Bucketing — which Item Group the PM Value is reported under
-
-Switchable in the UI, because the two rules give materially different answers.
-
-**`Work order first row` (default).** Item Group and Month come from the **first row
-of that work order in file order** — equivalent to
-`VLOOKUP(Workorder, <input data>, Item Group)`. That row is the work order's primary
-input line: the RM line for most work orders, the PKG line for work orders that have
-no RM line at all (these bucket under `Packaging Material`).
-
-**`FG row`.** Item Group comes from the work order's FG rows. Work orders with zero
-or several distinct FG Item Groups cannot be resolved and their PM Value is reported
-as unmapped rather than guessed at.
-
-The two differ because a work order frequently consumes one item group and produces
-another, and because many work orders have no FG line to read at all. The first-row
-rule reproduces the reference pivot exactly; the FG-row rule does not. Both are
-available so the difference can be inspected rather than argued about.
-
-### PM Qty and cost per kg
+## Files
 
 ```
-PM Qty     = SUM over FG rows of ( Value In FG × PKG / 100 )
-FG Qty     = SUM over FG rows of Qty
-PM Cost/kg = PM Value ÷ (PM Qty | FG Qty)      ← denominator switchable
+index.html          markup, tokens and all styles
+assets/app.js       UI, filters, hand-rolled SVG charts
+assets/worker.js    parse, FG aggregation, pivots, xlsx writer
+vercel.json         static config
 ```
 
-Totals re-derive the ratio from summed numerator over summed denominator — never an
-average of monthly ratios.
-
-### Control total
-
-Every PKG row belongs to exactly one work order, and each work order's PM Value is
-attached to exactly one output cell, so:
-
-```
-SUM(PM Value across buckets) == SUM(Total Amount WHERE Item Type = 'PKG')
-```
-
-is true by construction. The dashboard shows both figures and their difference; the
-`PM Value Audit` tab and sheet carry the same numbers.
-
-## Output workbook
-
-| Sheet | Contents |
-|---|---|
-| `Monthly Summary` | Target Warehouse × FG Item Group × month |
-| `Monthly Summary - Source WH` | Source Warehouse × FG Item Group × month |
-| `Workorder Summary` | one row per work order, pre-aggregation |
-| `Logic & Audit` | every rule applied, the row census, and the reconciliation |
-| `Multiple FG Groups` | work orders with more than one distinct FG Item Group |
-
-Only months actually present in the data get columns, in calendar order.
-
-### Live formulas
-
-Every derived cell is written as a **real Excel formula with a cached value**, so the
-workbook recalculates and any figure can be traced by clicking the cell. Only the raw
-monthly sums are literal numbers; everything downstream of them is a formula:
-
-```
-PM Cost/KG        =IF(D2=0,0,E2/D2)          value ÷ denominator, divide-by-zero guarded
-Total (PM Value)  =SUM(E2,I2,M2,Q2)          across the month columns
-Grand Total       =SUM(E2:E125)              down the item-group rows
-Audit difference  =B10-B11-B12               source − allocated − unmapped, must read 0
-```
-
-Column widths, number formats and autofilter are also written. Frozen panes and bold
-headers are not — the browser build of SheetJS cannot emit them, and adding a server
-just to style a header row was not worth the infrastructure.
-
-## Believing the numbers
-
-The **Logic & Audit** tab recomputes eleven reconciliation checks from the loaded file
-every time a setting changes, and each one states what would be wrong if it failed:
-
-1. Allocated + unmapped equals the source PKG total — no value vanished.
-2. Nothing is left unallocated.
-3. The source total re-adds independently from the raw rows.
-4. No work order is counted twice — carrier cells equal distinct work orders.
-5. The monthly figures re-add to the total.
-6. The Target and Source warehouse views total identically.
-7. FG Qty ties back to a plain sum of Qty over the FG rows.
-8. Every PKG row carries a work order.
-9. No negative packaging value.
-10. Every row is classified by Item Type.
-11. Every row lands in a real month.
-
-Alongside them the tab shows a **row census** (where all the rows went) and **bucket
-provenance** (which line each work order took its item group from), so the reported
-figures can be walked back to the source rows without leaving the page. The same
-content is written to the `Logic & Audit` sheet of the download.
-
-## Notes
-
-- **Source Warehouse is read from the input (RM/PKG) lines, not the FG line.** FG rows
-  carry a Target Warehouse and a blank Source Warehouse, so taking it from FG rows
-  makes the entire Source WH summary read `Unknown`.
-- **A work order's PM Value lands in exactly one cell.** Where a work order spans
-  several warehouses or months on its FG rows, the value goes to its largest FG cell
-  rather than being repeated against each — repeating it inflates the control total.
+`assets/app.js` carries a `BUILD` constant appended to the worker URL. **Bump it
+whenever `worker.js` changes** — otherwise browsers keep running a cached worker,
+which silently masks edits.

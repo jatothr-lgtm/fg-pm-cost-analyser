@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FG / PM Cost Analyser</title>
-<meta name="description" content="Upload a production Excel extract and get packaging-material cost per kg by month, item group and warehouse.">
+<title>FG Packaging Cost Analyser</title>
+<meta name="description" content="Upload a production Excel extract and get packaging cost by month and item group, from FG rows only.">
 <style>
 /* ---------------------------------------------------------------- tokens */
 :root{
@@ -282,6 +282,31 @@ td.num{font-variant-numeric:tabular-nums}
   .charts{grid-template-columns:1fr}
   .brand .sub{display:none}
 }
+
+/* ------------------------------------------------- conditions & legend */
+.condline{display:flex;flex-wrap:wrap;gap:6px}
+.condline code{
+  font-size:11.5px;padding:3px 8px;border-radius:6px;
+  background:var(--surface-2);border:1px solid var(--border);color:var(--text-secondary);
+}
+.legend{display:flex;flex-wrap:wrap;gap:12px;padding:10px 2px 2px;font-size:12px;color:var(--text-secondary)}
+.legend .lg{display:inline-flex;align-items:center;gap:6px}
+.legend .lg i{width:9px;height:9px;border-radius:2px;flex:none}
+.doc .cond{display:grid;gap:10px;margin:12px 0 22px}
+.doc .cond .c{display:flex;gap:11px;align-items:flex-start}
+.doc .cond .n{
+  width:20px;height:20px;border-radius:5px;flex:none;margin-top:1px;
+  background:var(--accent-wash);color:var(--accent);
+  font-size:11.5px;font-weight:600;display:grid;place-items:center;
+}
+.doc .cond .ct{font-weight:600;font-size:13px}
+.doc .cond .cd{color:var(--text-secondary);font-size:12.5px;margin-top:2px}
+.doc .two{display:grid;grid-template-columns:1fr 1fr;gap:26px}
+@media (max-width:820px){.doc .two{grid-template-columns:1fr}}
+.doc code{
+  font-size:12px;padding:1px 5px;border-radius:4px;
+  background:var(--surface-2);border:1px solid var(--border);
+}
 </style>
 </head>
 <body>
@@ -291,8 +316,8 @@ td.num{font-variant-numeric:tabular-nums}
     <div class="brand">
       <div class="mark" aria-hidden="true"></div>
       <div>
-        <h1>FG / PM Cost Analyser</h1>
-        <div class="sub">Packaging-material cost per kg by month, item group and warehouse</div>
+        <h1>FG Packaging Cost Analyser</h1>
+        <div class="sub">Month-wise packaging cost from FG rows &middot; Total Cost &times; PKG / 100</div>
       </div>
     </div>
     <div class="top-actions">
@@ -309,16 +334,17 @@ td.num{font-variant-numeric:tabular-nums}
   <section id="upload">
     <div class="drop" id="drop">
       <h2>Drop your production extract here</h2>
-      <p>The first sheet is read in file order. Nothing is uploaded &mdash; the workbook is parsed
+      <p>Only <code>Item Type = FG</code> rows are analysed, and packaging cost is
+         <code>Total Cost &times; PKG / 100</code>. Nothing is uploaded &mdash; the workbook is parsed
          and calculated entirely inside your browser.</p>
       <button class="btn primary" id="pick">Choose Excel file</button>
       <input type="file" id="file" accept=".xlsx,.xls,.xlsm" hidden>
       <div class="reqs">
-        <span class="chip">Workorder</span><span class="chip">Item Group</span>
-        <span class="chip">Item Type</span><span class="chip">Qty</span>
-        <span class="chip">Total Amount</span><span class="chip">Value In FG</span>
-        <span class="chip">PKG</span><span class="chip">Date or Month</span>
-        <span class="chip">Target / Source Warehouse</span>
+        <span class="chip">Item Group</span><span class="chip">Item Type</span>
+        <span class="chip">Qty</span><span class="chip">PKG</span>
+        <span class="chip">Total Cost</span>
+        <span class="chip">or Value In FG + Additional Cost</span>
+        <span class="chip">Date or Month</span>
       </div>
       <div class="hint">.xlsx, .xls or .xlsm &middot; 100,000+ rows is fine</div>
     </div>
@@ -332,65 +358,51 @@ td.num{font-variant-numeric:tabular-nums}
 
     <div class="controls">
       <div class="field">
-        <label for="fMonth">Month</label>
-        <select id="fMonth"><option value="">All months</option></select>
+        <label for="fSheet">Sheet</label>
+        <select id="fSheet"></select>
       </div>
       <div class="field">
-        <label for="fWh">Warehouse</label>
-        <select id="fWh"><option value="">All warehouses</option></select>
+        <label for="fMonth">Month</label>
+        <select id="fMonth"><option value="">All months</option></select>
       </div>
       <div class="field">
         <label for="fGroup">Item group</label>
         <select id="fGroup"><option value="">All item groups</option></select>
       </div>
-      <div class="field">
-        <label for="fWhAxis">Warehouse axis</label>
-        <div class="seg" id="fWhAxis" role="group">
-          <button data-v="targetWh" aria-pressed="true">Target</button>
-          <button data-v="sourceWh" aria-pressed="false">Source</button>
-        </div>
-      </div>
       <div class="field spacer">
-        <label for="fMode">PM Value bucket</label>
-        <div class="seg" id="fMode" role="group">
-          <button data-v="firstRow" aria-pressed="true">Work order first row</button>
-          <button data-v="fgRow" aria-pressed="false">FG row</button>
-        </div>
-      </div>
-      <div class="field">
-        <label for="fDenom">Cost per kg &divide;</label>
-        <div class="seg" id="fDenom" role="group">
-          <button data-v="pmQty" aria-pressed="true">PM Qty</button>
-          <button data-v="fgQty" aria-pressed="false">FG Qty</button>
+        <label>Conditions</label>
+        <div class="condline">
+          <code>PKg Cost = Total Cost &times; PKG / 100</code>
+          <code>Item Type = FG</code>
+          <code>Qty &divide; PKg Cost</code>
         </div>
       </div>
     </div>
 
     <div class="charts">
       <div class="card">
-        <h3>PM Value by month</h3>
-        <div class="csub">Packaging spend booked to each month, from PKG rows only</div>
-        <figure><svg class="chart" id="cValue" role="img" aria-label="PM Value by month"></svg></figure>
+        <h3>Packaging cost by month</h3>
+        <div class="csub">Sum of PKg Cost, from FG rows only</div>
+        <figure><svg class="chart" id="cCost" role="img" aria-label="Packaging cost by month"></svg></figure>
       </div>
       <div class="card">
-        <h3>PM Cost per kg &mdash; top 5 item groups</h3>
-        <div class="csub">Monthly packaging cost per kg; lines end at their latest month</div>
-        <figure><svg class="chart" id="cTrend" role="img" aria-label="PM cost per kg by item group"></svg></figure>
+        <h3>Qty &divide; PKg Cost &mdash; top 5 item groups</h3>
+        <div class="csub">Month by month; the top line is labelled at its end</div>
+        <figure><svg class="chart" id="cTrend" role="img" aria-label="Qty per PKg Cost by item group"></svg></figure>
         <div class="legend" id="lTrend"></div>
       </div>
       <div class="card wide">
-        <h3>PM Value by item group</h3>
-        <div class="csub">Largest packaging spend across the selected period</div>
-        <figure><svg class="chart" id="cGroups" role="img" aria-label="PM Value by item group"></svg></figure>
+        <h3>Packaging cost by item group</h3>
+        <div class="csub">Sum of PKg Cost across the selected months</div>
+        <figure><svg class="chart" id="cGroups" role="img" aria-label="Packaging cost by item group"></svg></figure>
       </div>
     </div>
 
     <div class="tabs" id="tabs" role="tablist">
-      <button role="tab" aria-selected="true"  data-t="target">Monthly Summary</button>
-      <button role="tab" aria-selected="false" data-t="source">Monthly Summary &mdash; Source WH</button>
-      <button role="tab" aria-selected="false" data-t="wo">Workorder Summary</button>
-      <button role="tab" aria-selected="false" data-t="audit">Logic &amp; Audit</button>
-      <button role="tab" aria-selected="false" data-t="multi">Multiple FG Groups</button>
+      <button role="tab" aria-selected="true"  data-t="trend">Monthly Trend</button>
+      <button role="tab" aria-selected="false" data-t="months">Month Totals</button>
+      <button role="tab" aria-selected="false" data-t="groups">Item Group Summary</button>
+      <button role="tab" aria-selected="false" data-t="audit">Conditions &amp; Audit</button>
     </div>
     <div class="tablewrap">
       <div class="tabbar">
@@ -415,6 +427,6 @@ td.num{font-variant-numeric:tabular-nums}
 </div>
 <div class="tip" id="tip" role="status"></div>
 
-<script src="assets/app.js?v=7"></script>
+<script src="assets/app.js?v=11"></script>
 </body>
 </html>

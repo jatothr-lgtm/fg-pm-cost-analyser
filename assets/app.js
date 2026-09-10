@@ -1,5 +1,5 @@
 /* ============================================================================
-   FG / PM Cost Analyser - UI layer
+   FG Packaging Cost Analyser - UI layer
    Charts are hand-rolled SVG so the mark specs hold exactly:
    <=24px bars with a 4px rounded data-end square at the baseline, 2px lines,
    >=8px markers carrying a 2px surface ring, solid hairline grid.
@@ -8,16 +8,10 @@
 'use strict';
 
 // bumped whenever worker.js changes, so browsers never run a cached worker
-const BUILD = '7';
+const BUILD = '11';
 self.__BUILD = BUILD;
 
 const $ = s => document.querySelector(s);
-const el = (t, a = {}, kids = []) => {
-  const n = document.createElementNS(t === 'div' || t === 'span' ? 'http://www.w3.org/1999/xhtml' : 'http://www.w3.org/2000/svg', t);
-  for (const k in a) n.setAttribute(k, a[k]);
-  kids.forEach(c => n.appendChild(c));
-  return n;
-};
 const svgEl = (t, a = {}) => {
   const n = document.createElementNS('http://www.w3.org/2000/svg', t);
   for (const k in a) if (a[k] !== null && a[k] !== undefined) n.setAttribute(k, a[k]);
@@ -25,23 +19,26 @@ const svgEl = (t, a = {}) => {
 };
 
 const nf0 = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
-const nf2 = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const fmt = (v, d = 0) => !isFinite(v) ? '0' : (d ? nf2 : nf0).format(v);
+const nfD = d => new Intl.NumberFormat('en-IN', { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmt = (v, d = 0) => !isFinite(v) ? '0' : (d ? nfD(d) : nf0).format(v);
 const compact = v => {
   const a = Math.abs(v);
   if (a >= 1e7) return (v / 1e7).toFixed(a >= 1e8 ? 0 : 1) + ' Cr';
   if (a >= 1e5) return (v / 1e5).toFixed(a >= 1e6 ? 0 : 1) + ' L';
   if (a >= 1e3) return (v / 1e3).toFixed(a >= 1e4 ? 0 : 1) + 'k';
-  return fmt(v);
+  return fmt(v, a < 100 && a % 1 ? 2 : 0);
 };
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const SERIES = () => [1, 2, 3, 4, 5].map(i => css('--series-' + i));
 
+const METRICS = ['Sum of Qty', 'Sum of PKg Cost', 'Qty / PKg Cost'];
+const ratio = (q, c) => c ? q / c : 0;
+
 /* ------------------------------------------------------------------ state */
 let worker = null, buffer = null, fileName = '', result = null;
-const opts = { mode: 'firstRow', denom: 'pmQty' };
-const filters = { month: '', wh: '', group: '', whAxis: 'targetWh' };
-let tab = 'target', page = 0, query = '';
+const filters = { month: '', group: '' };
+let sheet = '';                    // '' means let the worker choose
+let tab = 'trend', page = 0, query = '';
 const PAGE = 200;
 
 function ensureWorker() {
@@ -84,7 +81,7 @@ function process() {
   if (!buffer) return;
   busy(true);
   const copy = buffer.slice(0);
-  ensureWorker().postMessage({ cmd: 'process', buffer: copy, opts: { ...opts } }, [copy]);
+  ensureWorker().postMessage({ cmd: 'process', buffer: copy, opts: { sheet } }, [copy]);
 }
 
 const drop = $('#drop');
@@ -113,23 +110,15 @@ $('#theme').addEventListener('click', () => {
   if (result) drawCharts();
 });
 
-/* ---------------------------------------------------------------- segments */
-function seg(id, key, after) {
-  $(id).addEventListener('click', e => {
-    const b = e.target.closest('button'); if (!b) return;
-    [...e.currentTarget.querySelectorAll('button')].forEach(x => x.setAttribute('aria-pressed', String(x === b)));
-    const v = b.dataset.v;
-    if (key in opts) opts[key] = v; else filters[key] = v;
-    after();
-  });
-}
-seg('#fMode', 'mode', () => process());
-seg('#fDenom', 'denom', () => process());
-seg('#fWhAxis', 'whAxis', () => { page = 0; render(false); });
-
-['fMonth', 'fWh', 'fGroup'].forEach(id => {
+/* ---------------------------------------------------------------- controls */
+$('#fSheet').addEventListener('change', e => {
+  sheet = e.target.value;
+  filters.month = ''; filters.group = ''; page = 0;
+  process();                        // a different sheet is a different dataset
+});
+['fMonth', 'fGroup'].forEach(id => {
   $('#' + id).addEventListener('change', e => {
-    filters[{ fMonth: 'month', fWh: 'wh', fGroup: 'group' }[id]] = e.target.value;
+    filters[{ fMonth: 'month', fGroup: 'group' }[id]] = e.target.value;
     page = 0; render(false);
   });
 });
@@ -145,24 +134,31 @@ $('#next').addEventListener('click', () => { page++; drawTable(); });
 /* ------------------------------------------------------------------ derive */
 const filtered = () => result.long.filter(r =>
   (!filters.month || r.month === filters.month) &&
-  (!filters.wh || r[filters.whAxis] === filters.wh) &&
   (!filters.group || r.group === filters.group));
 
+const monthsIn = rows => result.months.filter(m => rows.some(r => r.month === m));
+const groupsIn = rows => [...new Set(rows.map(r => r.group))].sort((a, b) => a.localeCompare(b));
+
 function byMonth(rows) {
-  const m = new Map(result.months.map(x => [x, { month: x, fgQty: 0, pmQty: 0, pmValue: 0 }]));
-  rows.forEach(r => { const c = m.get(r.month); if (c) { c.fgQty += r.fgQty; c.pmQty += r.pmQty; c.pmValue += r.pmValue; } });
-  return [...m.values()];
+  const m = new Map(monthsIn(rows).map(x => [x, { month: x, qty: 0, cost: 0 }]));
+  rows.forEach(r => { const c = m.get(r.month); if (c) { c.qty += r.qty; c.cost += r.cost; } });
+  const out = [...m.values()]; out.forEach(c => c.ratio = ratio(c.qty, c.cost));
+  return out;
 }
 function byGroup(rows) {
   const m = new Map();
   rows.forEach(r => {
     let c = m.get(r.group);
-    if (!c) m.set(r.group, c = { group: r.group, fgQty: 0, pmQty: 0, pmValue: 0 });
-    c.fgQty += r.fgQty; c.pmQty += r.pmQty; c.pmValue += r.pmValue;
+    if (!c) m.set(r.group, c = { group: r.group, qty: 0, cost: 0 });
+    c.qty += r.qty; c.cost += r.cost;
   });
-  return [...m.values()].sort((a, b) => b.pmValue - a.pmValue);
+  const out = [...m.values()]; out.forEach(c => c.ratio = ratio(c.qty, c.cost));
+  return out.sort((a, b) => b.cost - a.cost);
 }
-const denomOf = c => opts.denom === 'fgQty' ? c.fgQty : c.pmQty;
+const totalsOf = rows => {
+  const qty = rows.reduce((a, r) => a + r.qty, 0), cost = rows.reduce((a, r) => a + r.cost, 0);
+  return { qty, cost, ratio: ratio(qty, cost) };
+};
 
 /* ------------------------------------------------------------------ render */
 function render(refill = true) {
@@ -175,54 +171,64 @@ function render(refill = true) {
 }
 
 function fillFilters() {
-  const set = (id, values, keep) => {
-    const s = $('#' + id), prev = keep && values.includes(filters[keep]) ? filters[keep] : '';
+  const set = (id, values, key) => {
+    const s = $('#' + id), prev = values.includes(filters[key]) ? filters[key] : '';
     s.length = 1;
     values.forEach(v => s.appendChild(Object.assign(document.createElement('option'), { value: v, textContent: v })));
-    s.value = prev; if (keep) filters[keep] = prev;
+    s.value = prev; filters[key] = prev;
   };
   set('fMonth', result.months, 'month');
-  const whs = [...new Set(result.long.map(r => r[filters.whAxis]))].sort();
-  set('fWh', whs, 'wh');
-  set('fGroup', [...new Set(result.long.map(r => r.group))].sort(), 'group');
+  set('fGroup', result.groups, 'group');
+
+  // the workbook may hold several plausible tabs, so name the one in use
+  const sel = $('#fSheet');
+  sel.innerHTML = '';
+  (result.sheets || []).filter(s => s.usable).forEach(s => {
+    sel.appendChild(Object.assign(document.createElement('option'),
+      { value: s.name, textContent: `${s.name} (${fmt(s.rows)} rows)` }));
+  });
+  if (![...sel.options].some(o => o.value === result.sheetName)) {
+    sel.appendChild(Object.assign(document.createElement('option'),
+      { value: result.sheetName, textContent: result.sheetName }));
+  }
+  sel.value = result.sheetName;
+  sheet = result.sheetName;
 }
 
 function drawStatus() {
-  const s = result.stats, ok = Math.abs(s.difference) < 0.5;
-  const unmapped = s.unmappedValue;
+  const a = result.audit;
+  const recomputeOk = !a.hasSourcePkgCost || a.recomputeMaxDiff < 1e-6;
   const host = $('#statusbar');
   host.innerHTML = '';
-  const cls = ok && !unmapped ? 'good' : (unmapped ? 'warning' : 'critical');
   const bar = document.createElement('div');
-  bar.className = 'bar ' + cls;
-  const modeTxt = opts.mode === 'firstRow'
-    ? 'bucketed on each work order&rsquo;s first row'
-    : 'bucketed on the FG row item group';
+  bar.className = 'bar ' + (recomputeOk ? 'good' : 'critical');
   bar.innerHTML =
     `<span class="dot"></span><div>` +
-    `<b>${ok ? 'Control total matches' : 'Control total does not match'}</b> &mdash; ` +
-    `source PKG <b class="tnum">${fmt(s.sourcePkg)}</b>, allocated <b class="tnum">${fmt(s.allocated)}</b>` +
-    (ok ? '' : `, difference <b class="tnum">${fmt(s.difference)}</b>`) +
+    `<b>PKg Cost = Total Cost &times; PKG / 100</b>` +
+    (a.hasSourcePkgCost
+      ? ` &mdash; reproduces the <code>PKg Cost</code> column in your file` +
+        ` (max difference <b class="tnum">${a.recomputeMaxDiff.toExponential(2)}</b>)`
+      : ` &mdash; computed from <code>Total Cost</code> and <code>PKG %</code>`) +
     `<div class="muted" style="margin-top:3px">` +
-    `${fmt(result.rowCount)} rows &middot; ${fmt(s.workorderCount)} work orders &middot; ${modeTxt}` +
-    (unmapped ? ` &middot; <b>${fmt(unmapped)}</b> unmapped across ${fmt(s.unmappedCount)} work orders` : '') +
+    `sheet <b>${result.sheetName}</b> &middot; ` +
+    `${fmt(result.rowCount)} rows read &middot; <b>${fmt(a.fgRows)}</b> FG rows analysed &middot; ` +
+    `${fmt(result.rowCount - a.fgRows)} non-FG rows excluded &middot; ` +
+    `${result.groups.length} item groups &middot; ${result.months.join(', ')}` +
+    (a.unknownMonthRows ? ` &middot; <b>${fmt(a.unknownMonthRows)}</b> rows with no readable month` : '') +
     `</div></div>`;
   host.appendChild(bar);
 }
 
 function drawTiles() {
   const rows = filtered();
-  const pmValue = rows.reduce((a, r) => a + r.pmValue, 0);
-  const pmQty = rows.reduce((a, r) => a + r.pmQty, 0);
-  const fgQty = rows.reduce((a, r) => a + r.fgQty, 0);
-  const den = opts.denom === 'fgQty' ? fgQty : pmQty;
-  const s = result.stats;
+  const t = totalsOf(rows);
+  const scope = filters.month || filters.group ? 'current filters' : 'all FG rows';
   const tiles = [
-    ['PM Value', fmt(pmValue), 'From PKG rows only'],
-    ['FG Qty', fmt(fgQty, 2), 'Sum of Qty on FG rows'],
-    ['PM Qty', fmt(pmQty, 2), 'Value In FG &times; PKG%'],
-    ['Blended PM Cost/kg', den ? fmt(pmValue / den, 2) : '—', 'PM Value &divide; ' + (opts.denom === 'fgQty' ? 'FG Qty' : 'PM Qty')],
-    ['Work orders', fmt(s.workorderCount), `${fmt(s.multiFgCount)} multi-group &middot; ${fmt(s.noFgCount)} no FG line`]
+    ['Sum of Qty', fmt(t.qty, 2), `Kg produced &middot; ${scope}`],
+    ['Sum of PKg Cost', fmt(t.cost, 2), 'Total Cost &times; PKG / 100'],
+    ['Qty / PKg Cost', t.cost ? fmt(t.ratio, 4) : '—', 'Re-derived from both totals'],
+    ['FG rows', fmt(result.audit.fgRows), `of ${fmt(result.rowCount)} rows read`],
+    ['Item groups', fmt(groupsIn(rows).length), `${result.months.length} month${result.months.length === 1 ? '' : 's'} in file`]
   ];
   $('#tiles').innerHTML = tiles.map(([l, v, n]) =>
     `<div class="tile"><div class="label">${l}</div><div class="value tnum">${v}</div><div class="note">${n}</div></div>`).join('');
@@ -260,24 +266,28 @@ const barPath = (x, y, w, h, r) => {
   return `M${x},${y}h${w - r}a${r},${r} 0 0 1 ${r},${r}v${h - 2 * r}a${r},${r} 0 0 1 ${-r},${r}H${x}Z`;
 };
 const clear = n => { while (n.firstChild) n.removeChild(n.firstChild); };
+const axisTxt = (x, y, s, anchor = 'middle') => {
+  const t = svgEl('text', { x, y, 'text-anchor': anchor, class: 'axis-txt tnum' });
+  t.textContent = s; return t;
+};
 
 /* ------------------------------------------------------------- the charts */
 function drawCharts() {
   if (!result) return;
   const rows = filtered();
-  chartValueByMonth(byMonth(rows));
-  chartTrend(rows);
+  chartCostByMonth(byMonth(rows));
+  chartRatioTrend(rows);
   chartGroups(byGroup(rows));
 }
 
-function chartValueByMonth(data) {
-  const svg = $('#cValue'), W = svg.clientWidth || 520, H = 260;
-  const M = { t: 18, r: 14, b: 30, l: 58 };
+/* One series, so one colour and no legend - the card title names it. */
+function chartCostByMonth(data) {
+  const svg = $('#cCost'), W = svg.clientWidth || 520, H = 260;
+  const M = { t: 18, r: 14, b: 30, l: 62 };
   clear(svg); svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
   if (!data.length) return;
 
-  const max = Math.max(...data.map(d => d.pmValue), 1);
-  const ticks = niceTicks(max);
+  const ticks = niceTicks(Math.max(...data.map(d => d.cost), 1));
   const top = ticks[ticks.length - 1] || 1;
   const pw = W - M.l - M.r, ph = H - M.t - M.b;
   const y = v => M.t + ph - (v / top) * ph;
@@ -286,155 +296,157 @@ function chartValueByMonth(data) {
 
   ticks.forEach(t => {
     svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: y(t), y2: y(t), stroke: css('--grid'), 'stroke-width': 1 }));
-    const lb = svgEl('text', { x: M.l - 9, y: y(t) + 4, 'text-anchor': 'end', class: 'axis-txt tnum' });
-    lb.textContent = compact(t); svg.appendChild(lb);
+    svg.appendChild(axisTxt(M.l - 9, y(t) + 4, compact(t), 'end'));
   });
 
   data.forEach((d, i) => {
-    const cx = M.l + band * i + band / 2, h = Math.max(0, y(0) - y(d.pmValue));
-    if (h > 0) {
-      const p = svgEl('path', { d: colPath(cx - bw / 2, y(d.pmValue), bw, h, 4), fill: css('--series-1') });
-      svg.appendChild(p);
-    }
+    const cx = M.l + band * i + band / 2, h = Math.max(0, y(0) - y(d.cost));
+    if (h > 0) svg.appendChild(svgEl('path', {
+      d: colPath(cx - bw / 2, y(d.cost), bw, h, 4), fill: css('--series-1')
+    }));
+    svg.appendChild(axisTxt(cx, H - 10, d.month));
     const hit = svgEl('rect', { x: cx - band / 2, y: M.t, width: band, height: ph, fill: 'transparent' });
     hit.addEventListener('mousemove', e => showTip(e, d.month, [
-      ['PM Value', fmt(d.pmValue)], ['FG Qty', fmt(d.fgQty, 2)], ['PM Qty', fmt(d.pmQty, 2)],
-      ['PM Cost/kg', denomOf(d) ? fmt(d.pmValue / denomOf(d), 2) : '—']
+      ['Sum of PKg Cost', fmt(d.cost, 2)],
+      ['Sum of Qty', fmt(d.qty, 2)],
+      ['Qty / PKg Cost', fmt(d.ratio, 4)]
     ]));
     hit.addEventListener('mouseleave', hideTip);
     svg.appendChild(hit);
-
-    const cap = svgEl('text', { x: cx, y: y(d.pmValue) - 7, 'text-anchor': 'middle', class: 'val-txt tnum' });
-    cap.textContent = compact(d.pmValue); svg.appendChild(cap);
-    const mx = svgEl('text', { x: cx, y: H - 9, 'text-anchor': 'middle', class: 'axis-txt' });
-    mx.textContent = d.month; svg.appendChild(mx);
   });
   svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: y(0), y2: y(0), stroke: css('--axis'), 'stroke-width': 1 }));
 }
 
-function chartTrend(rows) {
-  const svg = $('#cTrend'), W = svg.clientWidth || 520, H = 260;
-  const M = { t: 18, r: 62, b: 30, l: 54 };
-  clear(svg); svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
-  const legend = $('#lTrend'); legend.innerHTML = '';
+/* Up to five groups. A legend is always present; only the top series carries
+   a direct end-label, so converging lines never collide. */
+function chartRatioTrend(rows) {
+  const svg = $('#cTrend'), legend = $('#lTrend');
+  const W = svg.clientWidth || 520, H = 260;
+  const M = { t: 18, r: 74, b: 30, l: 56 };
+  clear(svg); legend.innerHTML = '';
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
 
-  const top5 = byGroup(rows).slice(0, 5).map(g => g.group);
-  if (!top5.length) return;
-  const months = result.months;
-  const colors = SERIES();
+  const months = monthsIn(rows);
+  const top5 = byGroup(rows).slice(0, 5);
+  if (!months.length || !top5.length) return;
 
+  const at = new Map(rows.map(r => [r.group + '||' + r.month, r]));
   const series = top5.map((g, i) => ({
-    name: g, color: colors[i],
-    points: months.map(m => {
-      const cs = rows.filter(r => r.group === g && r.month === m)
-        .reduce((a, r) => (a.fgQty += r.fgQty, a.pmQty += r.pmQty, a.pmValue += r.pmValue, a), { fgQty: 0, pmQty: 0, pmValue: 0 });
-      const d = denomOf(cs);
-      return { month: m, v: d ? cs.pmValue / d : null, cs };
+    name: g.group, colour: SERIES()[i], total: g.cost,
+    pts: months.map((m, x) => {
+      const c = at.get(g.group + '||' + m);
+      return { x, month: m, v: c ? ratio(c.qty, c.cost) : null, qty: c ? c.qty : 0, cost: c ? c.cost : 0 };
     })
   }));
 
-  const vals = series.flatMap(s => s.points.map(p => p.v)).filter(v => v !== null && isFinite(v));
-  if (!vals.length) return;
-  const ticks = niceTicks(Math.max(...vals));
+  const vals = series.flatMap(s => s.pts.map(p => p.v)).filter(v => v !== null);
+  const ticks = niceTicks(Math.max(...vals, 1));
   const top = ticks[ticks.length - 1] || 1;
   const pw = W - M.l - M.r, ph = H - M.t - M.b;
-  const x = i => months.length === 1 ? M.l + pw / 2 : M.l + (pw * i) / (months.length - 1);
   const y = v => M.t + ph - (v / top) * ph;
+  const x = i => months.length === 1 ? M.l + pw / 2 : M.l + (i / (months.length - 1)) * pw;
 
-  // one decimal precision for the whole axis, taken from the tick step
-  const step = ticks.length > 1 ? ticks[1] - ticks[0] : top;
-  const axisDec = step >= 10 ? 0 : step >= 1 ? 1 : 2;
   ticks.forEach(t => {
     svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: y(t), y2: y(t), stroke: css('--grid'), 'stroke-width': 1 }));
-    const lb = svgEl('text', { x: M.l - 9, y: y(t) + 4, 'text-anchor': 'end', class: 'axis-txt tnum' });
-    lb.textContent = fmt(t, axisDec); svg.appendChild(lb);
+    svg.appendChild(axisTxt(M.l - 9, y(t) + 4, fmt(t, t < 10 ? 1 : 0), 'end'));
   });
-  months.forEach((m, i) => {
-    const lb = svgEl('text', { x: x(i), y: H - 9, 'text-anchor': 'middle', class: 'axis-txt' });
-    lb.textContent = m; svg.appendChild(lb);
-  });
+  months.forEach((m, i) => svg.appendChild(axisTxt(x(i), H - 10, m)));
 
-  const endLabels = [];
   series.forEach(s => {
-    const pts = s.points.map((p, i) => ({ ...p, x: x(i), y: p.v === null ? null : y(p.v) })).filter(p => p.y !== null);
-    if (pts.length > 1) {
+    const segs = [];
+    let cur = [];
+    s.pts.forEach(p => { if (p.v === null) { if (cur.length) segs.push(cur); cur = []; } else cur.push(p); });
+    if (cur.length) segs.push(cur);
+    segs.forEach(seg => {
+      if (seg.length === 1) return;
       svg.appendChild(svgEl('path', {
-        d: pts.map((p, i) => (i ? 'L' : 'M') + p.x + ',' + p.y).join(''),
-        fill: 'none', stroke: s.color, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round'
+        d: 'M' + seg.map(p => `${x(p.x)},${y(p.v)}`).join('L'),
+        fill: 'none', stroke: s.colour, 'stroke-width': 2,
+        'stroke-linejoin': 'round', 'stroke-linecap': 'round'
+      }));
+    });
+    // a 2px surface ring keeps markers legible where lines cross
+    for (const p of s.pts) {
+      if (p.v === null) continue;
+      svg.appendChild(svgEl('circle', {
+        cx: x(p.x), cy: y(p.v), r: 4, fill: s.colour,
+        stroke: css('--surface-1'), 'stroke-width': 2
       }));
     }
-    pts.forEach(p => {
-      const dot = svgEl('circle', { cx: p.x, cy: p.y, r: 4, fill: s.color, stroke: css('--surface-1'), 'stroke-width': 2 });
-      svg.appendChild(dot);
-      const hit = svgEl('circle', { cx: p.x, cy: p.y, r: 11, fill: 'transparent' });
-      hit.addEventListener('mousemove', e => showTip(e, `${s.name} · ${p.month}`, [
-        ['PM Cost/kg', fmt(p.v, 2)], ['PM Value', fmt(p.cs.pmValue)],
-        ['FG Qty', fmt(p.cs.fgQty, 2)], ['PM Qty', fmt(p.cs.pmQty, 2)]
-      ]));
-      hit.addEventListener('mouseleave', hideTip);
-      svg.appendChild(hit);
+  });
+
+  // Direct-label exactly one series: the one sitting highest at the right
+  // edge, which is the one furthest clear of the others. Labelling the lowest
+  // line instead would drop the text into the converging bundle.
+  const ends = series.map(s => ({ s, p: [...s.pts].reverse().find(q => q.v !== null) }))
+    .filter(e => e.p);
+  const lead = ends.sort((a, b) => b.p.v - a.p.v)[0];
+  if (lead) {
+    const t = svgEl('text', {
+      x: Math.min(x(lead.p.x) + 10, W - 4), y: y(lead.p.v) + 4, class: 'axis-txt',
+      fill: css('--text-secondary')
     });
-    const last = pts[pts.length - 1];
-    if (last) endLabels.push({ x: last.x, y: last.y, v: last.v });
+    t.textContent = lead.s.name; svg.appendChild(t);
+  }
 
-    const key = document.createElement('span');
-    key.innerHTML = `<i style="background:${s.color}"></i>${s.name}`;
-    legend.appendChild(key);
+  // hover column: one tooltip listing every series at that month
+  months.forEach((m, i) => {
+    const half = months.length === 1 ? pw / 2 : pw / (months.length - 1) / 2;
+    const hit = svgEl('rect', {
+      x: Math.max(M.l, x(i) - half), y: M.t,
+      width: Math.min(half * 2, pw), height: ph, fill: 'transparent'
+    });
+    hit.addEventListener('mousemove', e => showTip(e, m,
+      series.map(s => {
+        const p = s.pts[i];
+        return [s.name, p.v === null ? '—' : fmt(p.v, 4)];
+      })));
+    hit.addEventListener('mouseleave', hideTip);
+    svg.appendChild(hit);
   });
 
-  // Direct end-labels only where they do not collide. Converging lines get no
-  // label rather than a stacked pile detached from its line - the legend and
-  // the hover tooltip carry those values instead.
-  endLabels.sort((a, b) => a.y - b.y);
-  let lastY = -Infinity;
-  endLabels.forEach(p => {
-    if (p.y - lastY < 15) return;
-    lastY = p.y;
-    const lb = svgEl('text', { x: p.x + 9, y: p.y + 4, class: 'val-txt tnum' });
-    lb.textContent = fmt(p.v, 2);
-    svg.appendChild(lb);
-  });
-  svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: y(0), y2: y(0), stroke: css('--axis'), 'stroke-width': 1 }));
+  legend.innerHTML = series.map(s =>
+    `<span class="lg"><i style="background:${s.colour}"></i>${s.name}</span>`).join('');
+  svg.appendChild(svgEl('line', { x1: M.l, x2: M.l, y1: M.t, y2: H - M.b, stroke: css('--axis'), 'stroke-width': 1 }));
 }
 
-function chartGroups(groups) {
-  const data = groups.slice(0, 12);
-  const svg = $('#cGroups'), W = svg.clientWidth || 900;
-  const rowH = 30, M = { t: 8, r: 96, b: 26, l: 166 };
-  const H = M.t + M.b + Math.max(1, data.length) * rowH;
+/* One series again: nominal categories all wear slot 1, never a value ramp. */
+function chartGroups(data) {
+  const svg = $('#cGroups');
+  const rows = data.slice(0, 15);
+  const W = svg.clientWidth || 900, rowH = 26, H = Math.max(120, rows.length * rowH + 44);
+  const M = { t: 10, r: 78, b: 30, l: 132 };
   clear(svg); svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
-  if (!data.length) return;
+  if (!rows.length) return;
 
-  const max = Math.max(...data.map(d => d.pmValue), 1);
-  const ticks = niceTicks(max, 5);
+  const ticks = niceTicks(Math.max(...rows.map(d => d.cost), 1));
   const top = ticks[ticks.length - 1] || 1;
   const pw = W - M.l - M.r;
   const x = v => M.l + (v / top) * pw;
-  const bh = Math.min(24, rowH - 10);
+  const bh = Math.min(24, rowH - 8);
 
   ticks.forEach(t => {
     svg.appendChild(svgEl('line', { x1: x(t), x2: x(t), y1: M.t, y2: H - M.b, stroke: css('--grid'), 'stroke-width': 1 }));
-    const lb = svgEl('text', { x: x(t), y: H - 8, 'text-anchor': 'middle', class: 'axis-txt tnum' });
-    lb.textContent = compact(t); svg.appendChild(lb);
+    svg.appendChild(axisTxt(x(t), H - 10, compact(t)));
   });
 
-  data.forEach((d, i) => {
-    const cy = M.t + i * rowH + rowH / 2, w = Math.max(0, x(d.pmValue) - M.l);
-    if (w > 0) svg.appendChild(svgEl('path', { d: barPath(M.l, cy - bh / 2, w, bh, 4), fill: css('--series-1') }));
+  rows.forEach((d, i) => {
+    const yy = M.t + i * rowH + (rowH - bh) / 2;
+    const w = Math.max(0, x(d.cost) - M.l);
+    if (w > 0) svg.appendChild(svgEl('path', {
+      d: barPath(M.l, yy, w, bh, 4), fill: css('--series-1')
+    }));
+    const lb = svgEl('text', { x: M.l - 10, y: yy + bh / 2 + 4, 'text-anchor': 'end', class: 'axis-txt' });
+    lb.textContent = d.group.length > 17 ? d.group.slice(0, 16) + '…' : d.group;
+    svg.appendChild(lb);
+    // value at the tip, outside the bar so it can never be clipped
+    svg.appendChild(axisTxt(Math.min(x(d.cost) + 8, W - 4), yy + bh / 2 + 4, compact(d.cost), 'start'));
 
-    const name = svgEl('text', { x: M.l - 11, y: cy + 4, 'text-anchor': 'end', class: 'axis-txt' });
-    name.textContent = d.group.length > 24 ? d.group.slice(0, 23) + '…' : d.group;
-    svg.appendChild(name);
-
-    const den = denomOf(d);
-    const v = svgEl('text', { x: x(d.pmValue) + 9, y: cy + 4, class: 'val-txt tnum' });
-    v.textContent = compact(d.pmValue) + (den ? `  ·  ${fmt(d.pmValue / den, 2)}/kg` : '');
-    svg.appendChild(v);
-
-    const hit = svgEl('rect', { x: M.l, y: cy - rowH / 2, width: pw + M.r - 8, height: rowH, fill: 'transparent' });
+    const hit = svgEl('rect', { x: M.l, y: M.t + i * rowH, width: pw, height: rowH, fill: 'transparent' });
     hit.addEventListener('mousemove', e => showTip(e, d.group, [
-      ['PM Value', fmt(d.pmValue)], ['FG Qty', fmt(d.fgQty, 2)], ['PM Qty', fmt(d.pmQty, 2)],
-      ['PM Cost/kg', den ? fmt(d.pmValue / den, 2) : '—']
+      ['Sum of PKg Cost', fmt(d.cost, 2)],
+      ['Sum of Qty', fmt(d.qty, 2)],
+      ['Qty / PKg Cost', fmt(d.ratio, 4)]
     ]));
     hit.addEventListener('mouseleave', hideTip);
     svg.appendChild(hit);
@@ -447,264 +459,121 @@ let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() 
 /* ------------------------------------------------------------------ tables */
 function tableData() {
   const rows = filtered();
-  if (tab === 'target' || tab === 'source') {
-    const whKey = tab === 'target' ? 'targetWh' : 'sourceWh';
-    const label = tab === 'target' ? 'Target Warehouse' : 'Source Warehouse';
-    const map = new Map();
-    rows.forEach(r => {
-      const k = r[whKey] + '' + r.group;
-      let o = map.get(k);
-      if (!o) map.set(k, o = { wh: r[whKey], group: r.group, c: {} });
-      const c = o.c[r.month] || (o.c[r.month] = { fgQty: 0, pmQty: 0, pmValue: 0 });
-      c.fgQty += r.fgQty; c.pmQty += r.pmQty; c.pmValue += r.pmValue;
-    });
-    const months = result.months;
-    const header = [label, 'FG Item Group'];
-    months.forEach(m => header.push(`${m} (FG Qty)`, `${m} (PM Qty)`, `${m} (PM Value)`, `${m} (PM Cost/KG)`));
-    header.push('Total (FG Qty)', 'Total (PM Qty)', 'Total (PM Value)', 'Total (PM Cost/KG)');
-    const body = [...map.values()].sort((a, b) => (a.wh + a.group).localeCompare(b.wh + b.group)).map(o => {
-      const line = [o.wh, o.group]; let tq = 0, tp = 0, tv = 0;
+
+  if (tab === 'trend') {
+    const months = monthsIn(rows), groups = groupsIn(rows);
+    const at = new Map(rows.map(r => [r.group + '||' + r.month, r]));
+    const header = ['Item Group'];
+    months.forEach(m => METRICS.forEach(k => header.push(`${m} (${k})`)));
+    METRICS.forEach(k => header.push(`Total (${k})`));
+
+    const body = groups.map(g => {
+      const line = [g]; let tq = 0, tc = 0;
       months.forEach(m => {
-        const c = o.c[m] || { fgQty: 0, pmQty: 0, pmValue: 0 };
-        const d = denomOf(c);
-        line.push(c.fgQty, c.pmQty, c.pmValue, d ? c.pmValue / d : 0);
-        tq += c.fgQty; tp += c.pmQty; tv += c.pmValue;
+        const c = at.get(g + '||' + m);
+        const q = c ? c.qty : 0, k = c ? c.cost : 0;
+        tq += q; tc += k;
+        line.push(q, k, ratio(q, k));
       });
-      const td = opts.denom === 'fgQty' ? tq : tp;
-      line.push(tq, tp, tv, td ? tv / td : 0);
+      line.push(tq, tc, ratio(tq, tc));
       return line;
     });
-    if (body.length) {
-      const g = ['Grand Total', ''];
-      for (let c = 2; c < header.length; c++) g.push(body.reduce((s, r) => s + r[c], 0));
-      for (let i = 0; i < months.length; i++) {
-        const b = 2 + i * 4, d = opts.denom === 'fgQty' ? g[b] : g[b + 1];
-        g[b + 3] = d ? g[b + 2] / d : 0;
-      }
-      const tb = 2 + months.length * 4, td = opts.denom === 'fgQty' ? g[tb] : g[tb + 1];
-      g[tb + 3] = td ? g[tb + 2] / td : 0;
-      body.push(g);
-    }
-    return { header, body, textCols: 2, totalLast: true };
+    const grand = ['Grand Total'];
+    for (let c = 1; c < header.length; c++) grand.push(body.reduce((s, r) => s + r[c], 0));
+    for (let c = 1; c < header.length; c += 3) grand[c + 2] = ratio(grand[c], grand[c + 1]);
+    body.push(grand);
+    return { header, body, textCols: 1, totalLast: true, dec: c => (c % 3 === 1 ? 2 : 4) };
   }
-  if (tab === 'wo') {
-    return {
-      header: ['Workorder', 'Bucket Item Group', 'First Row Type', 'Month', 'FG Item Groups', 'FG Groups',
-               'Target Warehouse', 'Source Warehouse', 'FG Qty', 'FG Value', 'PM Qty', 'PM Value', 'PKG Lines', 'FG Lines'],
-      body: result.workorders.map(w => [w.wo, w.firstGroup, w.firstType, w.month, w.fgGroups, w.fgGroupCount,
-        w.targetWh, w.sourceWh, w.fgQty, w.fgValue, w.pmQty, w.pmValue, w.pkgLines, w.fgLines]),
-      textCols: 8
-    };
+
+  if (tab === 'months') {
+    const header = ['Month', 'Month No.', ...METRICS];
+    const body = byMonth(rows).map(m => [m.month, result.months.indexOf(m.month) + 1, m.qty, m.cost, m.ratio]);
+    const t = totalsOf(rows);
+    body.push(['Grand Total', '', t.qty, t.cost, t.ratio]);
+    return { header, body, textCols: 2, totalLast: true, dec: c => (c === 2 ? 2 : 4) };
   }
-  if (tab === 'audit') return null;   // rendered by renderAudit()
-  return {
-    header: ['Workorder', 'Month', 'Bucket Item Group', 'FG Item Groups', 'Count', 'PM Value', 'FG Qty'],
-    body: result.multiFg.map(r => [r.wo, r.month, r.firstGroup, r.fgGroups, r.count, r.pmValue, r.fgQty]),
-    textCols: 4
-  };
-}
 
-/* --------------------------------------------------- logic & audit panel */
-function auditChecks() {
-  const a = result.audit, s = result.stats, L = result.long;
-  const near = (x, y) => Math.abs(x - y) < 0.5;
+  if (tab === 'groups') {
+    const t = totalsOf(rows);
+    const header = ['Item Group', ...METRICS, 'Share of PKg Cost'];
+    const body = byGroup(rows).map(g => [g.group, g.qty, g.cost, g.ratio, t.cost ? g.cost / t.cost : 0]);
+    body.push(['Grand Total', t.qty, t.cost, t.ratio, t.cost ? 1 : 0]);
+    return { header, body, textCols: 1, totalLast: true, dec: c => (c === 1 ? 2 : 4), pct: 4 };
+  }
 
-  const carriers = L.filter(r => r.pmValue !== 0);
-  const distinctCarriers = new Set(carriers.map(r => r.wo)).size;
-
-  const monthSum = L.reduce((m, r) => (m[r.month] = (m[r.month] || 0) + r.pmValue, m), {});
-  const monthTotal = Object.values(monthSum).reduce((x, y) => x + y, 0);
-
-  const byT = L.reduce((m, r) => (m[r.targetWh] = (m[r.targetWh] || 0) + r.pmValue, m), {});
-  const byS = L.reduce((m, r) => (m[r.sourceWh] = (m[r.sourceWh] || 0) + r.pmValue, m), {});
-  const tSum = Object.values(byT).reduce((x, y) => x + y, 0);
-  const sSum = Object.values(byS).reduce((x, y) => x + y, 0);
-
-  const typeTotal = Object.values(a.typeCounts).reduce((x, y) => x + y, 0);
-
-  return [
-    {
-      ok: near(s.allocated + s.unmappedValue, s.sourcePkg),
-      what: 'Every rupee of packaging spend is accounted for',
-      why: 'Allocated + unmapped must equal the PKG total read straight off the source rows. A gap here would mean value silently vanished between reading and reporting.',
-      fig: `${fmt(s.allocated)} + ${fmt(s.unmappedValue)} vs ${fmt(s.sourcePkg)}`
-    },
-    {
-      ok: near(s.unmappedValue, 0),
-      what: 'Nothing is left unallocated',
-      why: opts.mode === 'firstRow'
-        ? 'Every work order resolves to exactly one item group, so no packaging value is stranded.'
-        : 'FG-row bucketing cannot resolve work orders with zero or several FG item groups, so their value is reported as unmapped rather than guessed at. Switch the bucket to “Work order first row” to clear this.',
-      fig: fmt(s.unmappedValue)
-    },
-    {
-      ok: near(a.pkgAmountRaw - a.pkgValueNoWorkorder, s.sourcePkg),
-      what: 'The source total re-adds from the raw rows',
-      why: 'Summing Total Amount over every PKG row independently of the work order build reproduces the same control figure — the aggregation is not inventing or dropping value.',
-      fig: `${fmt(a.pkgAmountRaw - a.pkgValueNoWorkorder)} vs ${fmt(s.sourcePkg)}`
-    },
-    {
-      ok: distinctCarriers === carriers.length,
-      what: 'No work order is counted twice',
-      why: 'Each work order attaches its PM Value to exactly one output cell. If a work order appeared as a value carrier twice, its packaging cost would be double counted in every roll-up above.',
-      fig: `${fmt(carriers.length)} cells · ${fmt(distinctCarriers)} work orders`
-    },
-    {
-      ok: near(monthTotal, s.allocated),
-      what: 'The monthly figures re-add to the total',
-      why: 'Summing PM Value across the month columns returns the allocated total, so no value falls outside the reported months.',
-      fig: `${fmt(monthTotal)} vs ${fmt(s.allocated)}`
-    },
-    {
-      ok: near(tSum, sSum) && near(tSum, s.allocated),
-      what: 'Both warehouse views agree',
-      why: 'The Target and Source warehouse summaries are two cuts of the same numbers. They must total identically; a difference would mean one axis is dropping or duplicating rows.',
-      fig: `${fmt(tSum)} vs ${fmt(sSum)}`
-    },
-    {
-      ok: near(s.totalFgQty, a.fgQtyRaw),
-      what: 'FG Qty ties back to the FG rows',
-      why: 'The quantity denominator equals the plain sum of Qty over every FG row in the file — nothing is filtered out on the way to the report.',
-      fig: `${fmt(s.totalFgQty, 2)} vs ${fmt(a.fgQtyRaw, 2)}`
-    },
-    {
-      ok: a.pkgRowsNoWorkorder === 0,
-      what: 'Every PKG row carries a work order',
-      why: 'A packaging row with a blank work order cannot be attributed to any item group, and its value would be dropped from the report entirely.',
-      fig: `${fmt(a.pkgRowsNoWorkorder)} orphan rows` + (a.pkgValueNoWorkorder ? ` · ${fmt(a.pkgValueNoWorkorder)}` : '')
-    },
-    {
-      ok: a.woNegativePm === 0,
-      what: 'No negative packaging value',
-      why: 'A negative PM Value points at a reversal or credit note booked into the extract, which would understate the cost per kg for its item group.',
-      fig: `${fmt(a.woNegativePm)} work orders`
-    },
-    {
-      ok: typeTotal === result.rowCount,
-      what: 'Every row is classified',
-      why: 'Each of the rows read carries an Item Type that was counted. An unclassified row is a row whose value went nowhere.',
-      fig: `${fmt(typeTotal)} of ${fmt(result.rowCount)}`
-    },
-    {
-      ok: a.unknownMonthRows === 0,
-      what: 'Every row lands in a month',
-      why: 'Rows with an unreadable Date and Month fall into an “Unknown” column instead of the calendar. Their value is still counted, but not in the month it belongs to.',
-      fig: `${fmt(a.unknownMonthRows)} rows`
-    }
-  ];
+  return { header: [], body: [], textCols: 0 };
 }
 
 function renderAudit() {
-  const a = result.audit, s = result.stats;
-  const checks = auditChecks();
+  const a = result.audit;
+  const checks = result.checks;
   const passed = checks.filter(c => c.ok).length;
-
   const pill = ok => `<span class="pill ${ok ? 'pass' : 'fail'}">${ok ? '✓ Pass' : '✕ Check'}</span>`;
   const census = Object.entries(a.typeCounts).sort((x, y) => y[1] - x[1])
-    .map(([k, v]) => `<tr><td class="what">${k}</td><td class="fig">${fmt(v)} rows</td></tr>`).join('');
-  const prov = Object.entries(a.bucketSource).sort((x, y) => y[1] - x[1])
-    .map(([k, v]) => `<tr><td class="what">First row is ${k}</td><td class="fig">${fmt(v)} work orders</td></tr>`).join('');
-
-  const modeName = opts.mode === 'firstRow' ? 'Work order first row' : 'FG row Item Group';
-  const denName = opts.denom === 'fgQty' ? 'FG Qty' : 'PM Qty';
+    .map(([k, v]) => `<tr><td class="what">${k}${k.toUpperCase() === 'FG' ? ' <b>(analysed)</b>' : ' (excluded)'}</td><td class="fig">${fmt(v)} rows</td></tr>`).join('');
+  const t = totalsOf(result.long);
 
   return `<div class="doc">
 
+<h4>The conditions, as applied</h4>
+<p>Every number in this dashboard follows these five rules and nothing else. The exported
+workbook writes each of them into the cells as live formulas.</p>
+<div class="cond">
+  <div class="c"><div class="n">1</div><div>
+    <div class="ct">PKg Cost = Total Cost &times; PKG / 100</div>
+    <div class="cd"><code>PKG</code> is a percentage held as a plain number, so <code>10.55</code>
+    means 10.55%. <code>Total Cost</code> is
+    ${result.hasTotalCost ? 'taken from the file' : 'derived as <code>Value In FG + Additional Cost</code>'}.
+    This is <b>not</b> <code>Value In FG &times; PKG / 100</code> &mdash; that variant misses the
+    reference extract by up to 25.75.</div></div></div>
+  <div class="c"><div class="n">2</div><div>
+    <div class="ct">Item Type = FG only</div>
+    <div class="cd">Only finished-goods rows enter the analysis.
+    <b>${fmt(a.fgRows)}</b> of ${fmt(result.rowCount)} rows qualify;
+    ${fmt(result.rowCount - a.fgRows)} were excluded.</div></div></div>
+  <div class="c"><div class="n">3</div><div>
+    <div class="ct">Packaging cost per kg = SUM(Qty) &divide; SUM(PKg Cost)</div>
+    <div class="cd">Kept in that order because it is what the reference pivot shows. Totals
+    re-derive the ratio from the summed numerator and denominator &mdash; never an average of
+    the monthly ratios.</div></div></div>
+  <div class="c"><div class="n">4</div><div>
+    <div class="ct">Date 1 is derived from Date</div>
+    <div class="cd">Time of day stripped.</div></div></div>
+  <div class="c"><div class="n">5</div><div>
+    <div class="ct">Month is derived from Date, as a month name</div>
+    <div class="cd">Written <code>Jan</code>, <code>Feb</code>, <code>Mar</code> &mdash; not
+    <code>1</code>&ndash;<code>12</code> &mdash; and ordered by calendar position rather than
+    alphabetically. Months present: <b>${result.months.join(', ')}</b>.</div></div></div>
+</div>
+
 <h4>Reconciliation &mdash; ${passed} of ${checks.length} checks pass</h4>
-<p>Recomputed from the file you loaded, every time the settings change. These are the reasons
-to trust the numbers above; each one states what would be wrong if it failed.</p>
 <table class="checks"><tbody>
 ${checks.map(c => `<tr>
   <td class="st">${pill(c.ok)}</td>
-  <td><div class="what">${c.what}</div><div class="why">${c.why}</div></td>
+  <td><div class="what">${c.what}</div></td>
   <td class="fig">${c.fig}</td>
 </tr>`).join('')}
 </tbody></table>
 
-<div class="split">
-  <div>
-    <h4>Row census</h4>
-    <p>Where the ${fmt(result.rowCount)} rows of <code>${result.sheetName}</code> went.</p>
-    <table class="checks"><tbody>${census}
-      <tr><td class="what">No work order</td><td class="fig">${fmt(a.rowsNoWorkorder)} rows</td></tr>
-    </tbody></table>
-  </div>
-  <div>
-    <h4>Bucket provenance</h4>
-    <p>Which line each work order took its item group from.</p>
-    <table class="checks"><tbody>${prov}</tbody></table>
-  </div>
+<div class="two">
+<div><h4>Row types seen</h4>
+<table class="checks"><tbody>${census}</tbody></table></div>
+<div><h4>Totals across all FG rows</h4>
+<table class="checks"><tbody>
+<tr><td class="what">Sum of Qty</td><td class="fig">${fmt(t.qty, 2)}</td></tr>
+<tr><td class="what">Sum of PKg Cost</td><td class="fig">${fmt(t.cost, 2)}</td></tr>
+<tr><td class="what">Qty / PKg Cost</td><td class="fig">${fmt(t.ratio, 4)}</td></tr>
+<tr><td class="what">Sheet analysed</td><td class="fig">${result.sheetName}</td></tr>
+</tbody></table></div>
 </div>
 
-<h4>Current settings</h4>
-<table class="checks"><tbody>
-  <tr><td class="what">PM Value bucket</td><td class="fig">${modeName}</td></tr>
-  <tr><td class="what">PM Cost/kg denominator</td><td class="fig">${denName}</td></tr>
-  <tr><td class="what">Work orders</td><td class="fig">${fmt(s.workorderCount)}</td></tr>
-  <tr><td class="what">Work orders with &gt;1 FG item group</td><td class="fig">${fmt(s.multiFgCount)} &middot; ${fmt(s.multiFgValue)}</td></tr>
-  <tr><td class="what">Work orders with no FG line</td><td class="fig">${fmt(s.noFgCount)} &middot; ${fmt(s.noFgValue)}</td></tr>
-</tbody></table>
-
-<h4>The logic applied, in order</h4>
-
-<div class="rule"><div class="n">1</div><div class="b">
-  <div class="t">Read the first sheet in file order</div>
-  <p>Row order is load-bearing &mdash; rule 3 depends on it. Header whitespace is stripped;
-  numbers are coerced from text, and anything unparseable becomes 0 rather than breaking the run.</p>
-</div></div>
-
-<div class="rule"><div class="n">2</div><div class="b">
-  <div class="t">PM Value &mdash; packaging rows only</div>
-  <pre>PM Value(work order) = SUM(Total Amount) WHERE Item Type = 'PKG'</pre>
-  <p><code>RM</code>, <code>FG</code> and <code>BiProduct</code> rows contribute nothing.</p>
-</div></div>
-
-<div class="rule"><div class="n">3</div><div class="b">
-  <div class="t">Bucketing &mdash; which item group that value is reported under</div>
-  <p><b>Work order first row</b> (in use${opts.mode === 'firstRow' ? '' : ' &mdash; currently off'}): the item group and month
-  of the work order&rsquo;s <b>first row in file order</b>, which is its primary input line &mdash; the RM line for
-  most work orders, the PKG line for those with no RM at all. Equivalent to
-  <code>VLOOKUP(Workorder, &lt;data&gt;, Item Group)</code>.</p>
-  <p><b>FG row</b>: the item group on the work order&rsquo;s FG rows. Work orders with zero or several
-  distinct FG groups cannot be resolved and their value is reported unmapped.</p>
-  <p>The two differ because a work order routinely consumes one item group and produces another,
-  and because many work orders have no FG line to read at all.</p>
-</div></div>
-
-<div class="rule"><div class="n">4</div><div class="b">
-  <div class="t">One value carrier per work order</div>
-  <p>Where a work order spans several months or warehouses on its FG rows, its PM Value is attached
-  to the single largest FG cell rather than repeated against each. Repeating it is the ordinary way
-  this calculation gets inflated; check 4 above is what proves it did not happen here.</p>
-</div></div>
-
-<div class="rule"><div class="n">5</div><div class="b">
-  <div class="t">Quantities</div>
-  <pre>PM Qty = SUM over FG rows of ( Value In FG &times; PKG / 100 )
-FG Qty = SUM over FG rows of Qty</pre>
-  <p><code>PKG</code> is a percentage held as a plain number, so <code>2.02</code> means 2.02%.</p>
-</div></div>
-
-<div class="rule"><div class="n">6</div><div class="b">
-  <div class="t">Cost per kg</div>
-  <pre>PM Cost/kg = PM Value &divide; ${denName}</pre>
-  <p>Totals re-derive the ratio from the summed numerator over the summed denominator &mdash;
-  never an average of the monthly ratios, which would weight a small month the same as a large one.</p>
-</div></div>
-
-<div class="rule"><div class="n">7</div><div class="b">
-  <div class="t">Warehouses</div>
-  <p>Target Warehouse is read from the FG rows. <b>Source Warehouse is read from the input
-  (RM / PKG) rows</b>, because FG rows carry it blank &mdash; taking it from the FG line makes the
-  entire source view read <code>Unknown</code>.</p>
-</div></div>
-
-<div class="rule"><div class="n">8</div><div class="b">
-  <div class="t">Months</div>
-  <p>Taken from <code>Date</code> where it parses, otherwise from a text <code>Month</code> column.
-  Columns appear in calendar order, and only for months actually present in the data.</p>
-</div></div>
-
+<h4>What the export contains</h4>
+<p><b>Raw Data</b> is the first tab &mdash; your source rows, with <code>Date 1</code>,
+<code>Month</code> and <code>PKg Cost</code> added as formulas. <b>Monthly Trend</b> holds one row
+per item group and three columns per month, every cell a <code>SUMIFS</code> back into Raw Data
+carrying all three conditions. <b>Month Totals</b> and <b>Item Group Summary</b> read the same data
+the other two ways, and <b>Logic &amp; Audit</b> restates these rules beside the control totals.
+Filters on this page do not narrow the export &mdash; it always covers the whole file.</p>
 </div>`;
 }
 
@@ -720,7 +589,7 @@ function drawTable() {
   }
   $('#search').hidden = false;
 
-  const { header, body, textCols, totalLast } = tableData();
+  const { header, body, textCols, totalLast, dec, pct } = tableData();
   const grand = totalLast && body.length ? body[body.length - 1] : null;
   let rows = grand ? body.slice(0, -1) : body;
 
@@ -740,7 +609,9 @@ function drawTable() {
 
   const cell = (v, i) => {
     if (typeof v === 'number') {
-      return `<td class="num">${fmt(v, Number.isInteger(v) ? 0 : 2)}</td>`;
+      if (pct === i) return `<td class="num">${(v * 100).toFixed(1)}%</td>`;
+      if (i < textCols) return `<td class="num">${fmt(v)}</td>`;
+      return `<td class="num">${fmt(v, dec ? dec(i) : 2)}</td>`;
     }
     return `<td class="txt">${String(v ?? '')}</td>`;
   };
@@ -755,14 +626,13 @@ function drawTable() {
 $('#download').addEventListener('click', () => {
   if (!result) return;
   busy(true); $('#stage').textContent = 'Building workbook…'; $('#fill').style.width = '55%';
-  const checks = auditChecks().map(c => ({ what: c.what, ok: c.ok, fig: c.fig }));
-  ensureWorker().postMessage({ cmd: 'export', result, opts: { ...opts }, checks });
+  ensureWorker().postMessage({ cmd: 'export', result, opts: {} });
 });
 function saveBook(buf) {
   const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = (fileName.replace(/\.[^.]+$/, '') || 'FG_PM') + '_Analysis.xlsx';
+  a.download = (fileName.replace(/\.[^.]+$/, '') || 'FG_Packaging') + '_Analysis.xlsx';
   document.body.appendChild(a); a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
 }

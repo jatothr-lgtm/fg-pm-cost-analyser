@@ -75,7 +75,7 @@ there when it closes:
 | May | 516,800,000 |
 | Jun | 530,000,000 |
 | Jul | 605,000,000 |
-| Aug | 690,000,000 |
+| Aug | 693,800,000 |
 
 The **numerator follows the current filter** while the denominator stays the
 whole month's sales — so filtering to one item group reads as "this group's
@@ -95,6 +95,23 @@ percentage sheet is revenue-weighted, not a mean of the monthly shares.
 
 `Sum of Qty` (FG Qty) stays a KPI tile and a column in every table and export
 sheet — it is the denominator of cost per kg — but it is no longer charted.
+
+### How figures are written
+
+Scaling and rounding are **presentation only** — every calculation, table and
+export cell still holds the full-precision value in base units (kg, rupees), so
+the workbook's `SUMIFS` chain and control totals still reconcile.
+
+| Metric | Written as | Example |
+|---|---|---|
+| FG Qty | whole **tonnes** (÷1,000) | `51,12,545.07` → `5,113` |
+| PM Cost | whole **crore** (÷10,000,000) | `30,03,23,811.4` → `30` |
+| PM Cost per kg | whole number | `58.7425` → `59` |
+| % of Revenue | 2 decimals | `3.85%` |
+
+Tiles always show whole units. Chart labels keep a decimal when the largest
+value is under 10 Cr — otherwise every month collapses to the same label and the
+trend disappears. Tooltips carry the exact PM Cost regardless.
 
 **Every chart prints its value for every month** — above each column, above each
 line marker, and at each bar end. Magnitudes are shortened (`4.7 L`, `52k`), the

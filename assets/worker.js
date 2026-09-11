@@ -41,7 +41,7 @@ const MONTH_LOOKUP = {
 /* Monthly revenue in INR. Supplied figures - not derived from the extract, so
    they live here and nowhere else. Add a month when it closes; a month that is
    absent gets no percentage rather than a misleading zero. */
-const REVENUE = { Apr: 410800000, May: 516800000, Jun: 530000000, Jul: 605000000, Aug: 690000000 };
+const REVENUE = { Apr: 410800000, May: 516800000, Jun: 530000000, Jul: 605000000, Aug: 693800000 };
 
 /* PM Cost as a share of the month's revenue. The numerator follows whatever is
    selected - all item groups, or one - while the denominator is always the whole

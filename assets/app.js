@@ -8,7 +8,7 @@
 'use strict';
 
 // bumped whenever worker.js changes, so browsers never run a cached worker
-const BUILD = '18';
+const BUILD = '20';
 self.__BUILD = BUILD;
 
 const $ = s => document.querySelector(s);
@@ -37,11 +37,37 @@ const METRICS = ['Sum of Qty', 'Sum of PKg Cost', 'PKg Cost / Qty'];
    export. FG Qty is finished goods, PM Cost is the packing material, and the
    ratio is packaging cost per kg. */
 const METRIC = {
-  cost:  { key: 'cost',  name: 'PM Cost',        col: 'Sum of PKg Cost',      dp: 2, card: '#cardCost' },
+  cost:  { key: 'cost',  name: 'PM Cost (Cr)',   col: 'Sum of PKg Cost',      dp: 2, card: '#cardCost' },
   ratio: { key: 'ratio', name: 'PM Cost per kg', col: 'PKg Cost / Qty',       dp: 2, card: '#cardRatio' },
   pct:   { key: 'pct',   name: '% of Revenue',   col: 'PM Cost % of Revenue', dp: 2, card: '#cardPct' }
 };
 const METRIC_ORDER = ['cost', 'ratio', 'pct'];
+
+/* How each figure is WRITTEN. Scale and rounding are presentation only - every
+   calculation, table and export cell still carries the full-precision value in
+   base units (kg, rupees), so nothing downstream shifts. */
+const TON = 1000, CR = 1e7;
+const DISP = {
+  qty:   { scale: TON, dp: 0, unit: 'T',  label: 'FG Qty (T)' },
+  cost:  { scale: CR,  dp: 0, unit: 'Cr', label: 'PM Cost (Cr)' },
+  ratio: { scale: 1,   dp: 0, unit: '',   label: 'PM Cost per kg' },
+  pct:   { scale: 1,   dp: 2, unit: '%',  label: '% of Revenue' }
+};
+// the written form of a base-unit value, e.g. 300323811.4 -> "30 Cr"
+const show = (v, k, withUnit = false, dp = null) => {
+  const d = DISP[k];
+  if (!isFinite(v)) return '—';
+  const t = fmt(v / d.scale, dp === null ? d.dp : dp);
+  return withUnit && d.unit ? (d.unit === '%' ? t + '%' : t + ' ' + d.unit) : t;
+};
+/* Whole crore is what the tiles show. On a chart it can collapse every month
+   to the same label - nine bars all reading "2 Cr" - so when the largest value
+   is small the axis and labels keep a decimal and the trend stays readable. */
+const chartDp = (k, max) => {
+  if (k !== 'cost') return DISP[k].dp;
+  const m = Math.abs(max) / CR;
+  return m >= 10 ? 0 : m >= 1 ? 1 : 2;
+};
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const ratio = (q, c) => q ? c / q : 0;
 
@@ -283,9 +309,9 @@ function drawTiles() {
   const t = totalsOf(rows);
   const scope = filters.month || filters.group ? 'current filters' : 'all FG rows';
   const tiles = [
-    ['FG Qty', fmt(t.qty, 2), `Sum of Qty &middot; ${scope}`],
-    ['PM Cost', fmt(t.cost, 2), 'Sum of PKg Cost &middot; Total Amount &times; PKG / 100'],
-    ['PM Cost per kg', t.qty ? fmt(t.ratio, 2) : '—', 'PKg Cost &divide; Qty, re-derived'],
+    ['FG Qty (T)', show(t.qty, 'qty'), `Sum of Qty in tonnes &middot; ${scope}`],
+    ['PM Cost (Cr)', show(t.cost, 'cost'), 'Sum of PKg Cost &middot; Total Amount &times; PKG / 100'],
+    ['PM Cost per kg', t.qty ? show(t.ratio, 'ratio') : '—', 'PKg Cost &divide; Qty, re-derived'],
     ['% of Revenue', t.revenue ? fmt(t.pct, 2) + '%' : '—',
       t.revenue ? `PM Cost &divide; ${compact(t.revenue)} revenue` : 'No revenue for these months'],
     ['FG rows', fmt(result.audit.fgRows), `of ${fmt(result.rowCount)} rows read`]
@@ -377,13 +403,12 @@ function chartMonth(sel, data, key, dp) {
   const y = v => M.t + ph - (v / top) * ph;
   const band = pw / data.length;
   const cx = i => M.l + band * i + band / 2;
-  const label = v => key === 'cost' ? compact(v)
-    : fmt(v, v < 100 ? 2 : 0) + (key === 'pct' ? '%' : '');
+  const dpc = chartDp(key, Math.max(...plot.map(d => d[key]), 0));
+  const label = v => show(v, key, true, dpc);
 
   ticks.forEach(t => {
     svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: y(t), y2: y(t), stroke: css('--grid'), 'stroke-width': 1 }));
-    svg.appendChild(axisTxt(M.l - 9, y(t) + 4,
-      key === 'cost' ? compact(t) : fmt(t, t < 10 ? 1 : 0), 'end'));
+    svg.appendChild(axisTxt(M.l - 9, y(t) + 4, show(t, key, false, dpc), 'end'));
   });
 
   if (asLine) {
@@ -421,11 +446,12 @@ function chartMonth(sel, data, key, dp) {
     svg.appendChild(axisTxt(cx(i), H - 10, d.month));
     const hit = svgEl('rect', { x: cx(i) - band / 2, y: M.t, width: band, height: ph, fill: 'transparent' });
     hit.addEventListener('mousemove', e => showTip(e, d.month, [
-      ['FG Qty', fmt(d.qty, 2)],
-      ['PM Cost', fmt(d.cost, 2)],
-      ['PM Cost per kg', fmt(d.ratio, 2)],
-      ['Revenue', d.hasRev ? fmt(d.revenue) : '—'],
-      ['% of Revenue', d.hasRev ? fmt(d.pct, 2) + '%' : '—']
+      ['FG Qty', show(d.qty, 'qty', true)],
+      ['PM Cost', show(d.cost, 'cost', true)],
+      ['PM Cost per kg', show(d.ratio, 'ratio', true)],
+      ['Revenue', d.hasRev ? compact(d.revenue) : '—'],
+      ['% of Revenue', d.hasRev ? show(d.pct, 'pct', true) : '—'],
+      ['Exact PM Cost', fmt(d.cost, 2)]
     ]));
     hit.addEventListener('mouseleave', hideTip);
     svg.appendChild(hit);
@@ -462,6 +488,7 @@ function chartRatioTrend(rows, metric) {
   }));
 
   const vals = series.flatMap(s => s.pts.map(p => p.v)).filter(v => v !== null);
+  const dpL = chartDp(mk, Math.max(...vals, 0));
   const ticks = niceTicks(Math.max(...vals, 1));
   const top = ticks[ticks.length - 1] || 1;
   const pw = W - M.l - M.r, ph = H - M.t - M.b;
@@ -471,7 +498,7 @@ function chartRatioTrend(rows, metric) {
   ticks.forEach(t => {
     svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: y(t), y2: y(t), stroke: css('--grid'), 'stroke-width': 1 }));
     svg.appendChild(axisTxt(M.l - 9, y(t) + 4,
-      mk === 'cost' ? compact(t) : fmt(t, t < 10 ? 1 : 0), 'end'));
+      show(t, mk, false, dpL), 'end'));
   });
   months.forEach((m, i) => svg.appendChild(axisTxt(x(i), H - 10, m)));
 
@@ -522,7 +549,7 @@ function chartRatioTrend(rows, metric) {
     hit.addEventListener('mousemove', e => showTip(e, m,
       series.map(s => {
         const p = s.pts[i];
-        return [s.name, p.v === null ? '—' : fmt(p.v, 2) + (mk === 'pct' ? '%' : '')];
+        return [s.name, p.v === null ? '—' : show(p.v, mk, true, dpL)];
       })));
     hit.addEventListener('mouseleave', hideTip);
     svg.appendChild(hit);
@@ -545,6 +572,7 @@ function chartGroups(data, metric) {
   const mk = metric ? metric.key : 'cost';
   const gv = d => d[mk];
   rows.sort((a, b) => gv(b) - gv(a));
+  const dpG = chartDp(mk, Math.max(...rows.map(gv), 0));
   const ticks = niceTicks(Math.max(...rows.map(gv), 1));
   const top = ticks[ticks.length - 1] || 1;
   const pw = W - M.l - M.r;
@@ -553,7 +581,7 @@ function chartGroups(data, metric) {
 
   ticks.forEach(t => {
     svg.appendChild(svgEl('line', { x1: x(t), x2: x(t), y1: M.t, y2: H - M.b, stroke: css('--grid'), 'stroke-width': 1 }));
-    svg.appendChild(axisTxt(x(t), H - 10, mk === 'cost' ? compact(t) : fmt(t, t < 10 ? 1 : 0)));
+    svg.appendChild(axisTxt(x(t), H - 10, show(t, mk, false, dpG)));
   });
 
   rows.forEach((d, i) => {
@@ -570,15 +598,15 @@ function chartGroups(data, metric) {
       x: Math.min(x(gv(d)) + 8, W - 4), y: yy + bh / 2 + 4,
       'text-anchor': 'start', class: 'val-txt'
     });
-    vt.textContent = mk === 'cost' ? compact(gv(d)) : fmt(gv(d), 2) + (mk === 'pct' ? '%' : '');
+    vt.textContent = show(gv(d), mk, true, dpG);
     svg.appendChild(vt);
 
     const hit = svgEl('rect', { x: M.l, y: M.t + i * rowH, width: pw, height: rowH, fill: 'transparent' });
     hit.addEventListener('mousemove', e => showTip(e, d.group, [
-      ['FG Qty', fmt(d.qty, 2)],
-      ['PM Cost', fmt(d.cost, 2)],
-      ['PM Cost per kg', fmt(d.ratio, 2)],
-      ['% of Revenue', fmt(d.pct, 2) + '%']
+      ['FG Qty', show(d.qty, 'qty', true)],
+      ['PM Cost', show(d.cost, 'cost', true)],
+      ['PM Cost per kg', show(d.ratio, 'ratio', true)],
+      ['% of Revenue', show(d.pct, 'pct', true)]
     ]));
     hit.addEventListener('mouseleave', hideTip);
     svg.appendChild(hit);

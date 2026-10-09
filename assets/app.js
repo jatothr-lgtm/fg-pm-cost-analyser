@@ -8,7 +8,7 @@
 'use strict';
 
 // bumped whenever worker.js changes, so browsers never run a cached worker
-const BUILD = '20';
+const BUILD = '22';
 self.__BUILD = BUILD;
 
 const $ = s => document.querySelector(s);
@@ -70,6 +70,32 @@ const chartDp = (k, max) => {
 };
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const ratio = (q, c) => q ? c / q : 0;
+
+/* ------------------------------------------------------- revenue master
+   Monthly sales are supplied, not derived, so they live outside the extract.
+   Defaults ship in the worker; whatever is entered here overlays them and is
+   remembered in this browser. Only % of Revenue reads any of it. */
+const REV_KEY = 'fgpm-revenue-master';
+const readOverrides = () => {
+  try {
+    const o = JSON.parse(localStorage.getItem(REV_KEY) || '{}');
+    return (o && typeof o === 'object') ? o : {};
+  } catch { return {}; }            // private window, blocked storage, bad JSON
+};
+let revOverrides = readOverrides();
+const writeOverrides = () => {
+  try { localStorage.setItem(REV_KEY, JSON.stringify(revOverrides)); return true; }
+  catch { return false; }
+};
+// the figures in force: defaults from the worker, overlaid by the master
+const revMap = () => {
+  const base = { ...((result && result.revenueDefaults) || {}) };
+  for (const k in revOverrides) {
+    const v = Number(revOverrides[k]);
+    if (isFinite(v) && v > 0) base[k] = v; else delete base[k];
+  }
+  return base;
+};
 
 /* ------------------------------------------------------------------ state */
 let worker = null, buffer = null, fileName = '', result = null;
@@ -180,6 +206,61 @@ $('#search').addEventListener('input', e => { query = e.target.value.toLowerCase
 $('#prev').addEventListener('click', () => { if (page > 0) { page--; drawTable(); } });
 $('#next').addEventListener('click', () => { page++; drawTable(); });
 
+/* --------------------------------------------------------- revenue panel */
+const revPanel = $('#revPanel');
+function paintRevGrid() {
+  const defaults = (result && result.revenueDefaults) || {};
+  const live = revMap();
+  $('#revGrid').innerHTML = MONTHS.map(m => {
+    const v = live[m];
+    const custom = Object.prototype.hasOwnProperty.call(revOverrides, m);
+    return `<div class="revrow ${custom ? 'custom' : ''}">` +
+      `<label for="rev-${m}">${m}</label>` +
+      `<input id="rev-${m}" data-m="${m}" inputmode="numeric" placeholder="—" ` +
+      `value="${v ? Math.round(v) : ''}" aria-label="${m} revenue in rupees">` +
+      `<span class="tag">${custom ? 'saved' : (defaults[m] ? 'default' : '')}</span></div>`;
+  }).join('');
+  const n = MONTHS.filter(m => live[m]).length;
+  $('#revNote').textContent =
+    `${n} month${n === 1 ? '' : 's'} with a figure. Months left blank show no percentage.`;
+}
+function openRev(on) {
+  revPanel.hidden = !on;
+  $('#revBtn').setAttribute('aria-expanded', String(on));
+  if (on) { paintRevGrid(); revPanel.scrollIntoView({ block: 'nearest' }); }
+}
+$('#revBtn').addEventListener('click', () => openRev(revPanel.hidden));
+$('#revClose').addEventListener('click', () => openRev(false));
+$('#revSave').addEventListener('click', () => {
+  const defaults = (result && result.revenueDefaults) || {};
+  const next = {};
+  $('#revGrid').querySelectorAll('input').forEach(i => {
+    const m = i.dataset.m;
+    const raw = i.value.replace(/[,\s₹]/g, '').trim();
+    if (raw === '') {
+      // blank on a month that ships a default means "drop it", not "use default"
+      if (defaults[m]) next[m] = null;
+      return;
+    }
+    const v = Number(raw);
+    if (isFinite(v) && v > 0 && v !== defaults[m]) next[m] = v;
+  });
+  revOverrides = next;
+  const ok = writeOverrides();
+  paintRevGrid();
+  render(false);                       // percentages recompute without re-reading the file
+  $('#revNote').textContent = ok
+    ? 'Saved. % of Revenue updated — download again for the Excel to match.'
+    : 'Applied for this session only: this browser is blocking local storage.';
+});
+$('#revReset').addEventListener('click', () => {
+  revOverrides = {};
+  writeOverrides();
+  paintRevGrid();
+  render(false);
+  $('#revNote').textContent = 'Back to the built-in figures.';
+});
+
 /* ------------------------------------------------------------------ derive */
 const filtered = () => result.long.filter(r =>
   (!filters.month || r.month === filters.month) &&
@@ -193,17 +274,18 @@ function byMonth(rows) {
   const m = new Map(monthsIn(rows).map(x => [x, { month: x, qty: 0, cost: 0 }]));
   rows.forEach(r => { const c = m.get(r.month); if (c) { c.qty += r.qty; c.cost += r.cost; } });
   const out = [...m.values()];
+  const rev = revMap();
   out.forEach(c => {
     c.ratio = ratio(c.qty, c.cost);
     // the cost follows the current filter, the revenue is the whole month
-    c.revenue = (result.revenue || {})[c.month] || 0;
+    c.revenue = rev[c.month] || 0;
     c.pct = c.revenue ? c.cost / c.revenue * 100 : 0;
     c.hasRev = !!c.revenue;
   });
   return out;
 }
 function byGroup(rows) {
-  const rev = (result.revenue || {});
+  const rev = revMap();
   const revTot = monthsIn(rows).reduce((t, m) => t + (rev[m] || 0), 0);
   const m = new Map();
   rows.forEach(r => {
@@ -232,7 +314,7 @@ function byWarehouse(rows) {
 const totalsOf = rows => {
   const qty = rows.reduce((a, r) => a + r.qty, 0), cost = rows.reduce((a, r) => a + r.cost, 0);
   // only months that have a revenue figure may enter the blended share
-  const rev = (result.revenue || {});
+  const rev = revMap();
   let cWith = 0, rTot = 0;
   monthsIn(rows).forEach(m => {
     if (!rev[m]) return;
@@ -249,6 +331,7 @@ function render(refill = true) {
   $('#download').hidden = false;
   $('#reset').hidden = false;
   if (refill) fillFilters();
+  if (!revPanel.hidden) paintRevGrid();
   drawStatus(); drawTiles(); drawCharts(); drawTable();
 }
 
@@ -475,7 +558,7 @@ function chartRatioTrend(rows, metric) {
 
   const at = new Map(rows.map(r => [r.group + '||' + r.month, r]));
   const mk = metric ? metric.key : 'ratio';
-  const rev = (result.revenue || {});
+  const rev = revMap();
   const valOf = c => mk === 'cost' ? c.cost
     : mk === 'pct' ? (rev[c.month] ? c.cost / rev[c.month] * 100 : null)
     : ratio(c.qty, c.cost);
@@ -690,7 +773,7 @@ function tableData() {
 
   if (tab === 'pct') {
     // one row per item group, one column per month that has a revenue figure
-    const rev = (result.revenue || {});
+    const rev = revMap();
     const months = monthsIn(rows).filter(m => rev[m]);
     if (!months.length) return { header: ['Item Group'], body: [], textCols: 1 };
     const at = new Map();
@@ -888,7 +971,7 @@ function drawTable() {
 $('#download').addEventListener('click', () => {
   if (!result) return;
   busy(true); $('#stage').textContent = 'Building workbook…'; $('#fill').style.width = '55%';
-  ensureWorker().postMessage({ cmd: 'export', result, opts: {} });
+  ensureWorker().postMessage({ cmd: 'export', result, opts: { revenue: revMap() } });
 });
 function saveBook(buf) {
   const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });

@@ -314,6 +314,29 @@ td.num{font-variant-numeric:tabular-nums}
   font-size:12px;padding:1px 5px;border-radius:4px;
   background:var(--surface-2);border:1px solid var(--border);
 }
+
+/* ------------------------------------------------- revenue master */
+.revpanel{
+  border:1px solid var(--border);background:var(--surface-1);border-radius:var(--radius);
+  padding:16px 18px;margin-bottom:22px;box-shadow:var(--shadow);
+}
+.revhead{display:flex;align-items:flex-start;gap:16px;margin-bottom:14px}
+.revhead h3{font-size:14px}
+.revhead .btn{margin-left:auto;flex:none}
+.revgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(188px,1fr));gap:10px}
+.revrow{display:flex;align-items:center;gap:8px}
+.revrow label{width:30px;flex:none;font-size:12.5px;color:var(--text-secondary)}
+.revrow input{
+  flex:1;min-width:0;padding:7px 9px;font:inherit;font-size:13px;
+  border:1px solid var(--border-strong);border-radius:7px;
+  background:var(--plane);color:var(--text-primary);
+  font-variant-numeric:tabular-nums;text-align:right;
+}
+.revrow input:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.revrow.custom input{border-color:var(--accent)}
+.revrow .tag{font-size:10.5px;color:var(--text-muted);width:46px;flex:none}
+.revfoot{display:flex;align-items:center;gap:10px;margin-top:16px;flex-wrap:wrap}
+.revnote{font-size:12.5px;color:var(--text-secondary)}
 </style>
 </head>
 <body>
@@ -380,6 +403,10 @@ td.num{font-variant-numeric:tabular-nums}
         <label for="fWh">Target warehouse</label>
         <select id="fWh"><option value="">All warehouses</option></select>
       </div>
+      <div class="field">
+        <label for="revBtn">Revenue</label>
+        <button class="btn" id="revBtn" aria-expanded="false" aria-controls="revPanel">Revenue master</button>
+      </div>
       <div class="field spacer">
         <label for="fMetric">Compare</label>
         <div class="seg multi" id="fMetric" role="group" aria-label="Metrics to chart">
@@ -398,6 +425,23 @@ td.num{font-variant-numeric:tabular-nums}
         </div>
       </div>
     </div>
+
+    <section class="revpanel" id="revPanel" hidden>
+      <div class="revhead">
+        <div>
+          <h3>Revenue master</h3>
+          <div class="csub">Monthly sales in rupees. Feeds <b>% of Revenue</b> only &mdash; no other figure
+            depends on it. Saved in this browser.</div>
+        </div>
+        <button class="btn" id="revClose">Close</button>
+      </div>
+      <div class="revgrid" id="revGrid"></div>
+      <div class="revfoot">
+        <button class="btn primary" id="revSave">Save</button>
+        <button class="btn" id="revReset">Reset to defaults</button>
+        <span class="revnote" id="revNote"></span>
+      </div>
+    </section>
 
     <div class="charts three">
       <div class="card" id="cardCost">
@@ -463,6 +507,6 @@ td.num{font-variant-numeric:tabular-nums}
 </div>
 <div class="tip" id="tip" role="status"></div>
 
-<script src="assets/app.js?v=20"></script>
+<script src="assets/app.js?v=22"></script>
 </body>
 </html>

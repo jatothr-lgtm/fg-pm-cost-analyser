@@ -41,7 +41,22 @@ const MONTH_LOOKUP = {
 /* Monthly revenue in INR. Supplied figures - not derived from the extract, so
    they live here and nowhere else. Add a month when it closes; a month that is
    absent gets no percentage rather than a misleading zero. */
-const REVENUE = { Apr: 410800000, May: 516800000, Jun: 530000000, Jul: 605000000, Aug: 693800000 };
+const REVENUE_DEFAULTS = { Apr: 410800000, May: 516800000, Jun: 530000000, Jul: 605000000, Aug: 693800000 };
+
+/* The figures actually in force. Defaults above, overlaid by whatever the
+   Revenue master holds, so a month entered in the app wins and a month left
+   alone keeps its built-in value. Nothing else in the calculation reads these. */
+let REVENUE = { ...REVENUE_DEFAULTS };
+const applyRevenue = over => {
+  REVENUE = { ...REVENUE_DEFAULTS };
+  if (over && typeof over === 'object') {
+    for (const k in over) {
+      const v = Number(over[k]);
+      // anything not a positive number means "no figure for this month"
+      if (isFinite(v) && v > 0) REVENUE[k] = v; else delete REVENUE[k];
+    }
+  }
+};
 
 /* PM Cost as a share of the month's revenue. The numerator follows whatever is
    selected - all item groups, or one - while the denominator is always the whole
@@ -299,6 +314,7 @@ function scoreSheets(wb) {
 }
 
 function run(buffer, opts) {
+  applyRevenue(opts.revenue);
   post('Reading workbook', 8);
   const wb = XLSX.read(buffer, { type: 'array', cellDates: true, dense: false });
   const sheets = scoreSheets(wb);
@@ -396,7 +412,8 @@ function run(buffer, opts) {
     sheetName: picked.name, sheets, rowCount: rows.length, columns, hasTotalAmount, hasTotalCost,
     hasWh: columns.includes('Target Warehouse'),
     months, groups, warehouses, long, biLong, trend, whTrend, biWhTrend,
-    monthTotals, groupTotals, audit, checks, revenue: REVENUE
+    monthTotals, groupTotals, audit, checks,
+    revenue: REVENUE, revenueDefaults: REVENUE_DEFAULTS
   };
 }
 
@@ -414,6 +431,16 @@ function setFormula(ws, r, c, f, v, z) {
 }
 
 function buildWorkbook(res, opts) {
+  // The export must agree with the screen, so it reads the same master. The
+  // month rollup was built during the parse and carries whatever revenue was
+  // in force then, so refresh it - otherwise Month Totals keeps the stale
+  // figure while the percentage sheet uses the new one, and the two disagree
+  // inside the same file.
+  applyRevenue(opts && opts.revenue);
+  res.monthTotals.forEach(m => {
+    m.revenue = REVENUE[m.month] || null;
+    m.pct = pctOfRevenue(m.cost, m.month);
+  });
   const wb = XLSX.utils.book_new();
   const a0 = res.audit;                 // totals reused by the grand-total rows
 

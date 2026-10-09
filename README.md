@@ -65,9 +65,24 @@ three it runs three across.
 
 ### 6. PM Cost % of Revenue = PKg Cost ÷ monthly revenue × 100
 
-Revenue is a **supplied monthly constant**, not derived from the extract. It
-lives in one place — `REVENUE` at the top of `assets/worker.js`. Add a month
-there when it closes:
+Revenue is **supplied**, not derived from the extract — so it is entered rather
+than calculated.
+
+**Revenue master.** The button beside the filters opens a panel with a row per
+month. Type a figure, Save, and `% of Revenue` recomputes at once — no need to
+re-upload the workbook, because the percentage is derived. Download again for
+the Excel to match; the master is passed to the exporter so the file and the
+screen never disagree.
+
+Entries are kept in `localStorage` under `fgpm-revenue-master`, which means they
+live in **one browser on one machine** — another laptop, another browser, or
+cleared site data starts from the defaults again. Only the deltas are stored, so
+a month you never touch keeps following the built-in value.
+
+The built-in figures below are the seed. Anything entered overrides its month;
+**Reset to defaults** clears every override. A month left blank shows no
+percentage rather than a zero, and blended totals only count months that have a
+figure. Defaults live in `REVENUE_DEFAULTS` at the top of `assets/worker.js`:
 
 | Month | Total Sale (INR) |
 |---|---:|

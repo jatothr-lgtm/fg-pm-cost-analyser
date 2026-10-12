@@ -8,7 +8,7 @@
 'use strict';
 
 // bumped whenever worker.js changes, so browsers never run a cached worker
-const BUILD = '22';
+const BUILD = '23';
 self.__BUILD = BUILD;
 
 const $ = s => document.querySelector(s);

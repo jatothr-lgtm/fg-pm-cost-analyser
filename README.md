@@ -99,6 +99,24 @@ rather than a zero, and blended totals count only months that have one, so
 numerator and denominator always cover the same span. `Total (%)` on the
 percentage sheet is revenue-weighted, not a mean of the monthly shares.
 
+### 7. FG Qty counts only finished-goods output
+
+When summing `Qty`, a row counts only if it has a **work order** and its
+`Item Group` + `Target Warehouse` pair is on the list below. Control-sample,
+reprocessing, raw-material and returned-goods stores are real movements but not
+saleable output, so their quantity is left out.
+
+**`PKg Cost` is not scoped by this** — every FG row's packaging still counts.
+That is deliberate and it is why cost per kg rises: all packaging spend, spread
+over saleable output only. On the reference extract FG Qty drops 76.3% of the
+way down and cost per kg moves 57.91 → 75.88.
+
+The 16 pairs live in `FG_QTY_SCOPE` at the top of `assets/worker.js` and are
+written to a **FG Qty Scope** sheet in every export, where Raw Data's
+`Qty for FG Qty` column does a `COUNTIFS` against them — so the rule stays an
+auditable formula rather than a baked-in number. `Logic & Audit` reports how
+much quantity each exclusion cost.
+
 ---
 
 | On screen | Column in the export | Is |

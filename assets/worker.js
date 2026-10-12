@@ -64,6 +64,33 @@ const applyRevenue = over => {
    group's packaging ate x% of revenue". */
 const pctOfRevenue = (cost, month) => REVENUE[month] ? cost / REVENUE[month] * 100 : null;
 
+/* Which rows' Qty counts toward FG Qty. Finished-goods output only: a row
+   landing in a control-sample, reprocessing, raw-material or returned-goods
+   store is real production movement but not saleable output, so its quantity
+   is left out. PKg Cost is NOT scoped by this - every FG row's packaging still
+   counts, which is why cost per kg rises once this is on. */
+const FG_QTY_SCOPE = [
+  ['Seeds',           'RPC Indore - Finished Goods Stores - CBSPL'],
+  ['Dried Fruits',    'RPC Indore - Finished Goods Stores - CBSPL'],
+  ['Desserts',        'RPC Indore - Finished Goods Stores - CBSPL'],
+  ['Desserts',        'RPC Kundli - Finished Goods Stores - CBSPL'],
+  ['Dates',           'RPC Indore - Finished Goods Stores - CBSPL'],
+  ['Walnut',          'RPC Indore - Finished Goods Stores - CBSPL'],
+  ['Dry Fruit Mix',   'RPC Indore - Finished Goods Stores - CBSPL'],
+  ['Dry Fruit Combo', 'RPC Indore - Finished Goods Stores - CBSPL'],
+  ['Pistachio',       'RPC Indore - Finished Goods Stores - CBSPL'],
+  ['Makhana',         'RPC Purnia Finished Goods - CBSPL'],
+  ['Almonds',         'RPC Indore - Finished Goods Stores - CBSPL'],
+  ['Raisins',         'RPC Indore - Finished Goods Stores - CBSPL'],
+  ['Fig',             'RPC Indore - Finished Goods Stores - CBSPL'],
+  ['Cashewnut',       'RPC Indore - Finished Goods Stores - CBSPL'],
+  ['Apricot',         'RPC Indore - Finished Goods Stores - CBSPL'],
+  ['Gifting',         'RPC Indore - Finished Goods Stores - CBSPL']
+];
+const FG_QTY_SET = new Set(FG_QTY_SCOPE.map(([g, w]) => g + '||' + w));
+// a row's Qty counts only with a work order AND a listed group/warehouse pair
+const qtyCounts = (wo, group, wh) => !!wo && FG_QTY_SET.has(group + '||' + wh);
+
 const UNKNOWN = 'Unknown';
 const FG = 'FG';
 
@@ -144,6 +171,7 @@ function aggregate(rows, hasTotalAmount) {
   const audit = {
     typeCounts: {}, fgRows: 0, biRows: 0, unknownMonthRows: 0, blankPkgRows: 0,
     negativeCostRows: 0, qtyTotal: 0, costTotal: 0,
+    qtyBlankWoRows: 0, qtyBlankWoQty: 0, qtyOutOfScopeRows: 0, qtyOutOfScopeQty: 0,
     sourcePkgCostTotal: 0, recomputeMaxDiff: 0, hasSourcePkgCost: false
   };
 
@@ -164,7 +192,15 @@ function aggregate(rows, hasTotalAmount) {
       if (month === UNKNOWN) audit.unknownMonthRows++;
       if (!num(r['PKG'])) audit.blankPkgRows++;
       if (cost < 0) audit.negativeCostRows++;
-      audit.qtyTotal += qty;
+
+      // Qty is scoped; cost is not
+      const wo = txt(r['Workorder']);
+      const counts = qtyCounts(wo, group, wh);
+      if (!wo) { audit.qtyBlankWoRows++; audit.qtyBlankWoQty += qty; }
+      else if (!counts) { audit.qtyOutOfScopeRows++; audit.qtyOutOfScopeQty += qty; }
+      const qtyIn = counts ? qty : 0;
+
+      audit.qtyTotal += qtyIn;
       audit.costTotal += cost;
 
       if (r['PKg Cost'] !== undefined && r['PKg Cost'] !== null && r['PKg Cost'] !== '') {
@@ -178,7 +214,7 @@ function aggregate(rows, hasTotalAmount) {
       const key = group + '||' + month + '||' + wh;
       let c = cells.get(key);
       if (!c) cells.set(key, c = { group, month, monthNum: MONTH_NUM[month] || 99, targetWh: wh, qty: 0, cost: 0, rows: 0 });
-      c.qty += qty; c.cost += cost; c.rows++;
+      c.qty += qtyIn; c.cost += cost; c.rows++;
     } else if (type === 'BIPRODUCT') {
       audit.biRows++;
       const key = group + '||' + month + '||' + wh;
@@ -394,7 +430,9 @@ function run(buffer, opts) {
     { what: 'Non-FG rows excluded', ok: true, fig: (rows.length - audit.fgRows).toLocaleString('en-IN') },
     { what: 'Rows with an unreadable month', ok: audit.unknownMonthRows === 0, fig: audit.unknownMonthRows },
     { what: 'FG rows with blank or zero PKG %', ok: true, fig: audit.blankPkgRows },
-    { what: 'FG rows with negative PKg Cost', ok: audit.negativeCostRows === 0, fig: audit.negativeCostRows }
+    { what: 'FG rows with negative PKg Cost', ok: audit.negativeCostRows === 0, fig: audit.negativeCostRows },
+    { what: 'FG rows whose Qty is out of scope (cost still counted)', ok: true,
+      fig: (audit.qtyBlankWoRows + audit.qtyOutOfScopeRows).toLocaleString('en-IN') }
   ];
   if (audit.hasSourcePkgCost) {
     checks.push({
@@ -412,7 +450,7 @@ function run(buffer, opts) {
     sheetName: picked.name, sheets, rowCount: rows.length, columns, hasTotalAmount, hasTotalCost,
     hasWh: columns.includes('Target Warehouse'),
     months, groups, warehouses, long, biLong, trend, whTrend, biWhTrend,
-    monthTotals, groupTotals, audit, checks,
+    monthTotals, groupTotals, audit, checks, fgQtyScope: FG_QTY_SCOPE,
     revenue: REVENUE, revenueDefaults: REVENUE_DEFAULTS
   };
 }
@@ -458,6 +496,18 @@ function buildWorkbook(res, opts) {
      Source rows, laid out the way the reference workbook lays them out:
      Date 1 and Month first, then the source columns, then PKg Cost last.
      All three derived columns are formulas. */
+  /* The FG Qty rule, written down. Raw Data's scoped-qty column does a
+     COUNTIFS against this sheet, so the rule stays readable and editable in
+     Excel rather than baked into a number. */
+  const SCOPE = 'FG Qty Scope';
+  const scopeRows = res.fgQtyScope || [];
+  if (scopeRows.length) {
+    const ws = addAoa(SCOPE, ['Item Group', 'Target Warehouse'], scopeRows, false);
+    ws['!cols'] = [{ wch: 22 }, { wch: 46 }];
+  }
+  const scopeG = scopeRows.length ? `'${SCOPE}'!$A$2:$A$${scopeRows.length + 1}` : null;
+  const scopeW = scopeRows.length ? `'${SCOPE}'!$B$2:$B$${scopeRows.length + 1}` : null;
+
   const RAW = 'Raw Data';
   let rawRefs = null, rawDropped = [], rawOmitted = false;
   try {
@@ -473,8 +523,9 @@ function buildWorkbook(res, opts) {
     const CORE = ['Item Group', 'Item Type', 'Qty', 'PKG']
       .concat(res.hasTotalAmount ? ['Total Amount'] : (res.hasTotalCost ? ['Total Cost'] : ['Value In FG', 'Additional Cost']))
       .concat(cols.includes('Date') ? ['Date'] : [])
-      .concat(cols.includes('Target Warehouse') ? ['Target Warehouse'] : []);
-    const PRIORITY = CORE.concat(['Total Amount', 'Item Name', 'Workorder', 'Item Code',
+      .concat(cols.includes('Target Warehouse') ? ['Target Warehouse'] : [])
+      .concat(cols.includes('Workorder') ? ['Workorder'] : []);
+    const PRIORITY = CORE.concat(['Total Amount', 'Item Name', 'Item Code',
       'Amount', 'Basic Rate', 'Source Warehouse']);
 
     const sample = lastRows.slice(0, 500);
@@ -487,7 +538,7 @@ function buildWorkbook(res, opts) {
 
     // Date 1 (~34), Month (~86, a CHOOSE so it never depends on locale),
     // PKg Cost (~70), and Total Amount when it has to be derived (~40)
-    let budget = BUDGET - (190 + (res.hasTotalAmount || res.hasTotalCost ? 0 : 40)) * n;
+    let budget = BUDGET - (290 + (res.hasTotalAmount || res.hasTotalCost ? 0 : 40)) * n;
     const keep = new Set();
     const order = PRIORITY.filter(c => cols.includes(c))
       .concat(cols.filter(c => !PRIORITY.includes(c)));
@@ -501,13 +552,14 @@ function buildWorkbook(res, opts) {
 
     const derivedTotal = !res.hasTotalAmount && !res.hasTotalCost && !res.hasAmount;
     const totalColName = res.hasTotalAmount ? 'Total Amount' : (res.hasTotalCost ? 'Total Cost' : 'Total Amount');
-    const head = ['Date 1', 'Month'].concat(kept, derivedTotal ? [totalColName] : [], ['PKg Cost']);
+    const QCOL = 'Qty for FG Qty';
+    const head = ['Date 1', 'Month'].concat(kept, derivedTotal ? [totalColName] : [], ['PKg Cost', QCOL]);
     const body = lastRows.map(r => {
       const line = kept.map(c => {
         const v = r[c];
         return v instanceof Date ? v : (v === null || v === undefined ? '' : v);
       });
-      return [dateOnly(r) || '', monthOf(r)].concat(line, derivedTotal ? [0] : [], [0]);
+      return [dateOnly(r) || '', monthOf(r)].concat(line, derivedTotal ? [0] : [], [0, 0]);
     });
 
     const ws = XLSX.utils.aoa_to_sheet([head, ...body], { cellDates: true });
@@ -523,6 +575,10 @@ function buildWorkbook(res, opts) {
     const iTotal = at('Total Amount') >= 0 ? at('Total Amount') : (at('Total Cost') >= 0 ? at('Total Cost') : at('Amount'));
     const cTotal = iTotal >= 0 ? COL(iTotal) : COL(at(totalColName));
     const iPkgCost = at('PKg Cost');
+    const iQty = at(QCOL);
+    const cWo = at('Workorder') >= 0 ? L('Workorder') : null;
+    const cIg = L('Item Group'), cWh = at('Target Warehouse') >= 0 ? L('Target Warehouse') : null;
+    const cQty = L('Qty'), cType = L('Item Type');
     const dateIsReal = lastRows.some(r => r['Date'] instanceof Date || typeof r['Date'] === 'number');
 
     for (let i = 0; i < n; i++) {
@@ -543,13 +599,25 @@ function buildWorkbook(res, opts) {
       // CONDITION 1, written into the cell: =N2*U2/100
       setFormula(ws, r, iPkgCost, `$${cTotal}${row}*$${cPkg}${row}/100`,
         pkgCostOf(lastRows[i], res.hasTotalAmount), '#,##0.0000');
+
+      // FG Qty scope, written into the cell: a work order, and a listed
+      // Item Group / Target Warehouse pair, or the quantity does not count
+      const src = lastRows[i];
+      const inScope = txt(src['Item Type']).toUpperCase().replace(/[\s_-]/g, '') === FG &&
+        qtyCounts(txt(src['Workorder']), txt(src['Item Group']) || UNKNOWN,
+                  txt(src['Target Warehouse']) || UNKNOWN);
+      const guard = (scopeG && cWo && cWh)
+        ? `IF(AND($${cType}${row}="FG",$${cWo}${row}<>"",` +
+          `COUNTIFS(${scopeG},$${cIg}${row},${scopeW},$${cWh}${row})>0),$${cQty}${row},0)`
+        : `IF($${cType}${row}="FG",$${cQty}${row},0)`;
+      setFormula(ws, r, iQty, guard, inScope ? num(src['Qty']) : 0, '#,##0.00');
     }
     XLSX.utils.book_append_sheet(wb, ws, RAW);
 
     const rr = c => `'${RAW}'!$${c}$2:$${c}$${lastR}`;
     rawRefs = {
       month: rr(COL(1)), group: rr(L('Item Group')), type: rr(L('Item Type')),
-      qty: rr(L('Qty')), pkgCost: rr(COL(iPkgCost)),
+      qty: rr(COL(iQty)), pkgCost: rr(COL(iPkgCost)),
       wh: at('Target Warehouse') >= 0 ? rr(L('Target Warehouse')) : null
     };
   } catch (e) {
@@ -772,6 +840,9 @@ function buildWorkbook(res, opts) {
       'Total Amount x PKG / 100'],
     ['6. PM Cost % of Revenue', 'PKg Cost / monthly revenue x 100',
       'Revenue is a supplied constant, whole-month; the cost follows the filter'],
+    ['7. FG Qty scope', 'Work order present, and a listed group / warehouse',
+      'Qty only. PKg Cost still counts every FG row, so cost per kg rises'],
+    ['   Listed pairs', (res.fgQtyScope || []).length, 'See the FG Qty Scope sheet'],
     ['2. Row filter', 'Item Type = FG only', 'RM, PKG, BiProduct and any other type are excluded'],
     ['3. Packaging cost per kg', 'SUM(PKg Cost) / SUM(Qty)',
       'Totals re-derive the ratio; never an average of the monthly ratios'],
@@ -789,6 +860,10 @@ function buildWorkbook(res, opts) {
       res.hasWh ? 'Warehouse Trend splits the same metrics by these'
                 : 'No Target Warehouse column in the source'],
     ['Months present', res.months.join(', '), 'Calendar order'],
+    ['Qty skipped - blank work order', a.qtyBlankWoQty,
+      `${a.qtyBlankWoRows} FG rows; their PKg Cost still counts`],
+    ['Qty skipped - warehouse not listed', a.qtyOutOfScopeQty,
+      `${a.qtyOutOfScopeRows} FG rows; their PKg Cost still counts`],
     ['Raw Data tab', rawOmitted ? 'omitted - source too large to embed'
       : `all ${res.rowCount.toLocaleString('en-IN')} rows`,
       rawOmitted ? 'Report cells hold values instead of formulas' : 'Every report cell sums it'],
